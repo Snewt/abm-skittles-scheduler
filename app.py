@@ -1,18 +1,23 @@
 import streamlit as st
 import pandas as pd
 import datetime
+import re
 from ortools.sat.python import cp_model
 
 st.set_page_config(page_title="ABM Skittles Scheduler", layout="wide")
 
 # --- Constants & Mappings ---
 DAY_OFFSETS = {0: 0, 1: 0, 2: 1, 3: 1, 4: 2, 5: 2, 6: 3, 7: 3}
+SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1x7NdJCc9_Wh_fRkuR_9kQ6bwEsYLqii_zKGLdvf-Dt0/export?format=csv"
 
 class ABMSchedulerEngine:
     def __init__(self, div1_data, div2_data, play_weeks, matches_per_pair, venue_blocks, team_blocks):
-        div1_data['Division'] = 'Division 1'
-        div2_data['Division'] = 'Division 2'
-        self.team_data = pd.concat([div1_data, div2_data], ignore_index=True)
+        # We make a copy to avoid altering the session state data directly
+        d1 = div1_data.copy()
+        d2 = div2_data.copy()
+        d1['Division'] = 'Division 1'
+        d2['Division'] = 'Division 2'
+        self.team_data = pd.concat([d1, d2], ignore_index=True)
         
         self.num_teams = len(self.team_data)
         self.play_weeks = play_weeks 
@@ -168,8 +173,6 @@ class ABMSchedulerEngine:
             for w in range(self.num_weeks):
                 for s in range(self.num_slots):
                     match_date = self.play_weeks[w] + datetime.timedelta(days=DAY_OFFSETS[s])
-                    
-                    # Updated to %a for three-letter day format (e.g., Mon, Tue)
                     day_name = match_date.strftime("%a")
                     time_str = "8:00 pm" if s % 2 == 0 else "9:00 pm"
                     
@@ -202,11 +205,25 @@ def calculate_playing_weeks(start_date, end_date, xmas_start, xmas_end, easter_s
         current_date += datetime.timedelta(days=7)
     return weeks
 
+def create_default_df(prefix, count):
+    return pd.DataFrame({
+        "Team Name": [f"{prefix} Team {i+1}" for i in range(count)],
+        "Monday": ["Any"] * count,
+        "Tuesday": ["Any"] * count,
+        "Wednesday": ["Any"] * count,
+        "Thursday": ["Any"] * count,
+        "Prefers Time": ["No Preference"] * count
+    })
+
 # --- State Management ---
 if 'venue_blocks' not in st.session_state:
     st.session_state.venue_blocks = []
 if 'team_blocks' not in st.session_state:
     st.session_state.team_blocks = []
+if 'div1_data' not in st.session_state:
+    st.session_state.div1_data = create_default_df("D1", 10)
+if 'div2_data' not in st.session_state:
+    st.session_state.div2_data = create_default_df("D2", 10)
 
 # --- User Interface ---
 st.title("ABM Skittles Scheduler")
@@ -261,25 +278,63 @@ with tab2:
                 st.rerun()
 
 with tab3:
-    st.header("Division Setups")
+    st.header("Division Setups & Import")
     
-    # Dynamic Team Counters
-    col_d1, col_d2 = st.columns(2)
-    with col_d1:
-        num_div1 = st.number_input("Number of Teams in Division 1", min_value=2, max_value=20, value=10)
-    with col_d2:
-        num_div2 = st.number_input("Number of Teams in Division 2", min_value=2, max_value=20, value=10)
+    if st.button("🔄 Sync with Google Sheets Form", type="primary"):
+        try:
+            df_import = pd.read_csv(SHEET_CSV_URL)
+            
+            # Helper to extract the core columns smoothly
+            def extract_division(df, div_name):
+                div_df = df[df['Division'] == div_name].copy()
+                if div_df.empty:
+                    return pd.DataFrame()
+                res = pd.DataFrame()
+                res['Team Name'] = div_df['Team Name']
+                res['Monday'] = div_df['Monday']
+                res['Tuesday'] = div_df['Tuesday']
+                res['Wednesday'] = div_df['Wednesday']
+                res['Thursday'] = div_df['Thursday']
+                res['Prefers Time'] = div_df['Prefers Time']
+                return res.reset_index(drop=True)
 
-    def create_default_df(prefix, count):
-        return pd.DataFrame({
-            "Team Name": [f"{prefix} Team {i+1}" for i in range(count)],
-            "Monday": ["Any"] * count,
-            "Tuesday": ["Any"] * count,
-            "Wednesday": ["Any"] * count,
-            "Thursday": ["Any"] * count,
-            "Prefers Time": ["No Preference"] * count
-        })
-    
+            st.session_state.div1_data = extract_division(df_import, 'Division 1')
+            st.session_state.div2_data = extract_division(df_import, 'Division 2')
+            
+            # The Magic Date Parser: Splitting dates and converting them
+            parsed_blocks = []
+            for _, row in df_import.iterrows():
+                dates_str = row.get('Specific Unavailable Dates', '')
+                t_name = row['Team Name']
+                
+                if pd.notna(dates_str) and str(dates_str).strip():
+                    # Split on commas or line breaks if they put multiple dates
+                    raw_dates = re.split(r'[,\n]+', str(dates_str))
+                    for rd in raw_dates:
+                        rd = rd.strip()
+                        if not rd: continue
+                        
+                        try:
+                            # Try dd/mm/yy parsing
+                            p_date = datetime.datetime.strptime(rd, "%d/%m/%y").date()
+                            parsed_blocks.append({"Date": p_date, "Team": t_name})
+                        except ValueError:
+                            try:
+                                # Just in case a captain types the full 2026 year
+                                p_date = datetime.datetime.strptime(rd, "%d/%m/%Y").date()
+                                parsed_blocks.append({"Date": p_date, "Team": t_name})
+                            except ValueError:
+                                st.warning(f"Could not automatically read date '{rd}' for team '{t_name}'. Please add it manually in Tab 2.")
+            
+            # Add these successfully parsed dates into the background database
+            st.session_state.team_blocks.extend(parsed_blocks)
+            
+            st.success("Data successfully synced! Captains' preferences and specific dates have been loaded.")
+            
+        except Exception as e:
+            st.error(f"Failed to fetch data. Ensure the Google Sheet is shared publicly. Error: {e}")
+
+    st.write("Review or manually edit the team details below.")
     day_options = ["Any", "8:00 pm only", "9:00 pm only", "Unavailable"]
     col_config = {
         "Monday": st.column_config.SelectboxColumn("Monday", options=day_options),
@@ -290,10 +345,10 @@ with tab3:
     }
 
     st.subheader("Division 1")
-    div1_edited = st.data_editor(create_default_df("D1", num_div1), column_config=col_config, num_rows="dynamic", key="div1")
+    div1_edited = st.data_editor(st.session_state.div1_data, column_config=col_config, num_rows="dynamic", key="div1_ui")
     
     st.subheader("Division 2")
-    div2_edited = st.data_editor(create_default_df("D2", num_div2), column_config=col_config, num_rows="dynamic", key="div2")
+    div2_edited = st.data_editor(st.session_state.div2_data, column_config=col_config, num_rows="dynamic", key="div2_ui")
 
 with tab4:
     st.header("Generate Schedule")
