@@ -13,19 +13,11 @@ SLOT_NAMES = {
     6: "Thursday 8:00 pm", 7: "Thursday 9:00 pm"
 }
 
-DAY_TO_SLOTS = {
-    "None": [],
-    "Monday": [0, 1],
-    "Tuesday": [2, 3],
-    "Wednesday": [4, 5],
-    "Thursday": [6, 7]
-}
-
 class ABMSchedulerEngine:
     def __init__(self, team_data, play_weeks, matches_per_pair=2):
-        self.team_data = team_data # DataFrame of teams and preferences
+        self.team_data = team_data 
         self.num_teams = len(team_data)
-        self.play_weeks = play_weeks # List of actual dates (Mondays of playing weeks)
+        self.play_weeks = play_weeks 
         self.num_weeks = len(play_weeks)
         self.matches_per_pair = matches_per_pair
         self.num_slots = 8 
@@ -45,6 +37,16 @@ class ABMSchedulerEngine:
                                 self.play[(t1, t2, w, s, a)] = self.model.NewBoolVar(
                                     f'match_t{t1}_t{t2}_w{w}_s{s}_a{a}'
                                 )
+
+    def block_slots_for_team(self, team_idx, slots_to_block):
+        # Helper function to prevent a team playing in specific slots
+        for t2 in range(self.num_teams):
+            if team_idx != t2:
+                for w in range(self.num_weeks):
+                    for s in slots_to_block:
+                        for a in range(self.num_alleys):
+                            self.model.Add(self.play[(team_idx, t2, w, s, a)] == 0)
+                            self.model.Add(self.play[(t2, team_idx, w, s, a)] == 0)
 
     def add_constraints(self):
         # 1. Total Matches
@@ -78,25 +80,59 @@ class ABMSchedulerEngine:
                                 slot_matches.append(self.play[(t1, t2, w, s, a)])
                     self.model.Add(sum(slot_matches) <= 1)
 
-        # 4. TEAM PREFERENCES: Block unavailable days
-        for t, row in self.team_data.iterrows():
-            unavailable_day = row['Cannot Play On']
-            blocked_slots = DAY_TO_SLOTS.get(unavailable_day, [])
+        # 4. Equal Alley Usage
+        for t in range(self.num_teams):
+            alley_0_matches = []
+            alley_1_matches = []
+            for t2 in range(self.num_teams):
+                if t != t2:
+                    for w in range(self.num_weeks):
+                        for s in range(self.num_slots):
+                            alley_0_matches.extend([self.play[(t, t2, w, s, 0)], self.play[(t2, t, w, s, 0)]])
+                            alley_1_matches.extend([self.play[(t, t2, w, s, 1)], self.play[(t2, t, w, s, 1)]])
             
-            if blocked_slots:
+            # The difference in appearances between Alley 1 and Alley 2 must be <= 1
+            self.model.Add(sum(alley_0_matches) - sum(alley_1_matches) <= 1)
+            self.model.Add(sum(alley_1_matches) - sum(alley_0_matches) <= 1)
+
+        # 5. Hard Availability Constraints (from tick boxes)
+        for t, row in self.team_data.iterrows():
+            if not row['Play Mon']: self.block_slots_for_team(t, [0, 1])
+            if not row['Play Tue']: self.block_slots_for_team(t, [2, 3])
+            if not row['Play Wed']: self.block_slots_for_team(t, [4, 5])
+            if not row['Play Thu']: self.block_slots_for_team(t, [6, 7])
+            if not row['Play 8pm']: self.block_slots_for_team(t, [0, 2, 4, 6])
+            if not row['Play 9pm']: self.block_slots_for_team(t, [1, 3, 5, 7])
+
+        # 6. Soft Preferences (Minimise non-preferred slots)
+        penalties = []
+        for t, row in self.team_data.iterrows():
+            pref = row['Prefers Time']
+            if pref == "8:00 pm":
+                # Penalise 9pm slots (1, 3, 5, 7)
                 for t2 in range(self.num_teams):
                     if t != t2:
                         for w in range(self.num_weeks):
-                            for s in blocked_slots:
+                            for s in [1, 3, 5, 7]:
                                 for a in range(self.num_alleys):
-                                    # Force these specific match variables to be 0 (cannot happen)
-                                    self.model.Add(self.play[(t, t2, w, s, a)] == 0)
-                                    self.model.Add(self.play[(t2, t, w, s, a)] == 0)
+                                    penalties.extend([self.play[(t, t2, w, s, a)], self.play[(t2, t, w, s, a)]])
+            elif pref == "9:00 pm":
+                # Penalise 8pm slots (0, 2, 4, 6)
+                for t2 in range(self.num_teams):
+                    if t != t2:
+                        for w in range(self.num_weeks):
+                            for s in [0, 2, 4, 6]:
+                                for a in range(self.num_alleys):
+                                    penalties.extend([self.play[(t, t2, w, s, a)], self.play[(t2, t, w, s, a)]])
+        
+        # Tell the engine to find a valid schedule that keeps this penalty score as low as possible
+        self.model.Minimize(sum(penalties))
 
     def solve(self):
         self.add_constraints()
         solver = cp_model.CpSolver()
-        solver.parameters.max_time_in_seconds = 45.0 
+        # Increased time limit as optimisation takes longer than basic satisfaction
+        solver.parameters.max_time_in_seconds = 60.0 
         status = solver.Solve(self.model)
         
         results = []
@@ -108,16 +144,12 @@ class ABMSchedulerEngine:
                         for t1 in range(self.num_teams):
                             for t2 in range(self.num_teams):
                                 if t1 != t2 and solver.Value(self.play[(t1, t2, w, s, a)]) == 1:
-                                    # Get actual team names
-                                    home_team = self.team_data.iloc[t1]['Team Name']
-                                    away_team = self.team_data.iloc[t2]['Team Name']
-                                    
                                     results.append({
                                         "Week Commencing": week_date,
                                         "Match Time": SLOT_NAMES[s],
                                         "Alley": f"Alley {a + 1}",
-                                        "Home Team": home_team,
-                                        "Away Team": away_team
+                                        "Home Team": self.team_data.iloc[t1]['Team Name'],
+                                        "Away Team": self.team_data.iloc[t2]['Team Name']
                                     })
             return results
         else:
@@ -126,14 +158,11 @@ class ABMSchedulerEngine:
 def calculate_playing_weeks(start_date, end_date, xmas_start, xmas_end, easter_start, easter_end):
     weeks = []
     current_date = start_date
-    # Adjust to the nearest Monday
     current_date = current_date - datetime.timedelta(days=current_date.weekday())
     
     while current_date <= end_date:
-        # Check if this week falls in a blackout period
         in_xmas = xmas_start <= current_date <= xmas_end
         in_easter = easter_start <= current_date <= easter_end
-        
         if not in_xmas and not in_easter:
             weeks.append(current_date)
         current_date += datetime.timedelta(days=7)
@@ -154,26 +183,28 @@ with col2:
     easter_end = st.date_input("Easter Break End", datetime.date(2027, 4, 4))
 
 available_weeks = calculate_playing_weeks(season_start, season_end, xmas_start, xmas_end, easter_start, easter_end)
-st.info(f"Based on your dates, there are **{len(available_weeks)} playable weeks** available.")
+st.info(f"Playable weeks available: **{len(available_weeks)}**")
 
 st.header("2. Teams & Preferences")
-st.write("Edit the table below. You can change team names and set days they cannot play.")
+st.write("Untick the boxes for days/times a team **cannot** play. Set a soft preference in the final column.")
 
-# Default team data
 default_teams = pd.DataFrame({
     "Team Name": [f"Team {i+1}" for i in range(10)],
-    "Cannot Play On": ["None"] * 10
+    "Play Mon": [True] * 10,
+    "Play Tue": [True] * 10,
+    "Play Wed": [True] * 10,
+    "Play Thu": [True] * 10,
+    "Play 8pm": [True] * 10,
+    "Play 9pm": [True] * 10,
+    "Prefers Time": ["No Preference"] * 10
 })
 
-# Interactive spreadsheet
 edited_teams = st.data_editor(
     default_teams,
     column_config={
-        "Cannot Play On": st.column_config.SelectboxColumn(
-            "Cannot Play On",
-            help="Select a day this team cannot play.",
-            options=["None", "Monday", "Tuesday", "Wednesday", "Thursday"],
-            required=True
+        "Prefers Time": st.column_config.SelectboxColumn(
+            "Prefers Time",
+            options=["No Preference", "8:00 pm", "9:00 pm"]
         )
     },
     num_rows="dynamic",
@@ -183,17 +214,6 @@ edited_teams = st.data_editor(
 st.markdown("---")
 
 if st.button("Generate Fixtures", type="primary"):
-    # Safety check
     if len(available_weeks) < (len(edited_teams) - 1) * 2:
-        st.error("Not enough playable weeks to complete the season! Adjust your calendar dates.")
+        st.error("Not enough playable weeks to complete the season!")
     else:
-        with st.spinner("Calculating the smartest schedule... This may take up to 45 seconds."):
-            scheduler = ABMSchedulerEngine(edited_teams, available_weeks, matches_per_pair=2)
-            schedule_data = scheduler.solve()
-            
-            if schedule_data:
-                st.success("Success! Here are your fixtures.")
-                df = pd.DataFrame(schedule_data)
-                st.dataframe(df, use_container_width=True)
-            else:
-                st.error("The engine couldn't find a schedule that fits all these rules. Try removing some 'Cannot Play On' restrictions.")
