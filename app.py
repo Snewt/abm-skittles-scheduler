@@ -6,19 +6,11 @@ from ortools.sat.python import cp_model
 st.set_page_config(page_title="ABM Skittles Scheduler", layout="wide")
 
 # --- Constants & Mappings ---
-SLOT_NAMES = {
-    0: "Monday 8:00 pm", 1: "Monday 9:00 pm",
-    2: "Tuesday 8:00 pm", 3: "Tuesday 9:00 pm",
-    4: "Wednesday 8:00 pm", 5: "Wednesday 9:00 pm",
-    6: "Thursday 8:00 pm", 7: "Thursday 9:00 pm"
-}
-
 # Maps slot IDs to the number of days past Monday
 DAY_OFFSETS = {0: 0, 1: 0, 2: 1, 3: 1, 4: 2, 5: 2, 6: 3, 7: 3}
 
 class ABMSchedulerEngine:
     def __init__(self, div1_data, div2_data, play_weeks, matches_per_pair, venue_blocks, team_blocks):
-        # Combine divisions but keep track of who is where
         div1_data['Division'] = 'Division 1'
         div2_data['Division'] = 'Division 2'
         self.team_data = pd.concat([div1_data, div2_data], ignore_index=True)
@@ -37,7 +29,6 @@ class ABMSchedulerEngine:
         self.create_variables()
 
     def create_variables(self):
-        # Only create match variables for teams in the SAME division
         for t1 in range(self.num_teams):
             for t2 in range(self.num_teams):
                 if t1 != t2 and self.team_data.iloc[t1]['Division'] == self.team_data.iloc[t2]['Division']:
@@ -49,7 +40,7 @@ class ABMSchedulerEngine:
                                 )
 
     def add_constraints(self):
-        # 1. Total Matches (Intra-division only)
+        # 1. Total Matches 
         for t1 in range(self.num_teams):
             for t2 in range(t1 + 1, self.num_teams):
                 if self.team_data.iloc[t1]['Division'] == self.team_data.iloc[t2]['Division']:
@@ -58,7 +49,7 @@ class ABMSchedulerEngine:
                         for w in range(self.num_weeks) for s in range(self.num_slots) for a in range(self.num_alleys)
                     ) == self.matches_per_pair)
         
-        # 2. Match Frequency (Max 1 per week per team)
+        # 2. Match Frequency 
         for t in range(self.num_teams):
             for w in range(self.num_weeks):
                 weekly_matches = []
@@ -70,7 +61,7 @@ class ABMSchedulerEngine:
                                 weekly_matches.append(self.play[(t2, t, w, s, a)])
                 self.model.Add(sum(weekly_matches) <= 1)
 
-        # 3. Double Booking (Max 1 match per slot per alley globally)
+        # 3. Double Booking
         for w in range(self.num_weeks):
             for s in range(self.num_slots):
                 for a in range(self.num_alleys):
@@ -94,7 +85,7 @@ class ABMSchedulerEngine:
             self.model.Add(sum(alley_0_matches) - sum(alley_1_matches) <= 1)
             self.model.Add(sum(alley_1_matches) - sum(alley_0_matches) <= 1)
 
-        # 5. Process Day/Time Preferences from the Grid
+        # 5. Process Day/Time Preferences
         for t, row in self.team_data.iterrows():
             days_config = {
                 'Monday': (0, 1, row['Monday']),
@@ -102,7 +93,6 @@ class ABMSchedulerEngine:
                 'Wednesday': (4, 5, row['Wednesday']),
                 'Thursday': (6, 7, row['Thursday'])
             }
-            
             for day, (slot_8, slot_9, config) in days_config.items():
                 slots_to_block = []
                 if config == "Unavailable":
@@ -121,13 +111,12 @@ class ABMSchedulerEngine:
                                         self.model.Add(self.play[(t, t2, w, s, a)] == 0)
                                         self.model.Add(self.play[(t2, t, w, s, a)] == 0)
 
-        # 6. Process Specific Date Blocks (Club, Alley, and Teams)
+        # 6. Process Specific Date Blocks
         for w in range(self.num_weeks):
             week_start = self.play_weeks[w]
             for s in range(self.num_slots):
                 current_date = week_start + datetime.timedelta(days=DAY_OFFSETS[s])
                 
-                # Check Venue/Alley Blocks
                 for block in self.venue_blocks:
                     if block['Date'] == current_date:
                         alleys_to_block = [0, 1] if block['Scope'] == "Whole Club" else ([0] if block['Scope'] == "Alley 1" else [1])
@@ -137,7 +126,6 @@ class ABMSchedulerEngine:
                                     if (t1, t2, w, s, a) in self.play:
                                         self.model.Add(self.play[(t1, t2, w, s, a)] == 0)
 
-                # Check Team Specific Date Blocks
                 for block in self.team_blocks:
                     if block['Date'] == current_date:
                         target_team = block['Team']
@@ -149,7 +137,7 @@ class ABMSchedulerEngine:
                                             self.model.Add(self.play[(t, t2, w, s, a)] == 0)
                                             self.model.Add(self.play[(t2, t, w, s, a)] == 0)
 
-        # 7. Soft Preferences (Minimise non-preferred slots)
+        # 7. Soft Preferences
         penalties = []
         for t, row in self.team_data.iterrows():
             pref = row['Prefers Time']
@@ -157,14 +145,14 @@ class ABMSchedulerEngine:
                 for t2 in range(self.num_teams):
                     if t != t2 and (t, t2, 0, 0, 0) in self.play:
                         for w in range(self.num_weeks):
-                            for s in [1, 3, 5, 7]: # 9pm slots
+                            for s in [1, 3, 5, 7]: 
                                 for a in range(self.num_alleys):
                                     penalties.extend([self.play[(t, t2, w, s, a)], self.play[(t2, t, w, s, a)]])
             elif pref == "9:00 pm":
                 for t2 in range(self.num_teams):
                     if t != t2 and (t, t2, 0, 0, 0) in self.play:
                         for w in range(self.num_weeks):
-                            for s in [0, 2, 4, 6]: # 8pm slots
+                            for s in [0, 2, 4, 6]: 
                                 for a in range(self.num_alleys):
                                     penalties.extend([self.play[(t, t2, w, s, a)], self.play[(t2, t, w, s, a)]])
         
@@ -173,7 +161,6 @@ class ABMSchedulerEngine:
     def solve(self):
         self.add_constraints()
         solver = cp_model.CpSolver()
-        # Increased time limit due to cross-division slot competition
         solver.parameters.max_time_in_seconds = 120.0 
         status = solver.Solve(self.model)
         
@@ -182,17 +169,22 @@ class ABMSchedulerEngine:
             for w in range(self.num_weeks):
                 for s in range(self.num_slots):
                     match_date = self.play_weeks[w] + datetime.timedelta(days=DAY_OFFSETS[s])
+                    day_name = match_date.strftime("%A")
+                    time_str = "8:00 pm" if s % 2 == 0 else "9:00 pm"
+                    
                     for a in range(self.num_alleys):
                         for t1 in range(self.num_teams):
                             for t2 in range(self.num_teams):
                                 if (t1, t2, w, s, a) in self.play and solver.Value(self.play[(t1, t2, w, s, a)]) == 1:
                                     results.append({
+                                        "SortDate": match_date, # Hidden column for accurate sorting
                                         "Date": match_date.strftime("%d %b %Y"),
-                                        "Day/Time": SLOT_NAMES[s],
+                                        "Day": day_name,
+                                        "Time": time_str,
+                                        "Home Team Name": self.team_data.iloc[t1]['Team Name'],
+                                        "Away Team Name": self.team_data.iloc[t2]['Team Name'],
                                         "Alley": f"Alley {a + 1}",
-                                        "Division": self.team_data.iloc[t1]['Division'],
-                                        "Home Team": self.team_data.iloc[t1]['Team Name'],
-                                        "Away Team": self.team_data.iloc[t2]['Team Name']
+                                        "Division": self.team_data.iloc[t1]['Division']
                                     })
             return results
         else:
@@ -209,7 +201,7 @@ def calculate_playing_weeks(start_date, end_date, xmas_start, xmas_end, easter_s
         current_date += datetime.timedelta(days=7)
     return weeks
 
-# --- State Management for Exceptions ---
+# --- State Management ---
 if 'venue_blocks' not in st.session_state:
     st.session_state.venue_blocks = []
 if 'team_blocks' not in st.session_state:
@@ -229,7 +221,7 @@ with tab1:
         xmas_start = st.date_input("Xmas Break Start", datetime.date(2026, 12, 21))
         easter_start = st.date_input("Easter Break Start", datetime.date(2027, 3, 22))
     with col2:
-        st.write("") # Spacing
+        st.write("")
         season_end = st.date_input("Season Target End", datetime.date(2027, 5, 14))
         xmas_end = st.date_input("Xmas Break End", datetime.date(2027, 1, 3))
         easter_end = st.date_input("Easter Break End", datetime.date(2027, 4, 4))
@@ -239,8 +231,6 @@ with tab1:
 
 with tab2:
     st.header("Venue & Specific Date Blockers")
-    st.write("Use this to block the whole club, specific alleys, or specific teams on exact dates (e.g., 'Team X cannot play on 14th Oct').")
-    
     col_a, col_b = st.columns(2)
     with col_a:
         st.subheader("Add Venue/Alley Block")
@@ -271,8 +261,6 @@ with tab2:
 
 with tab3:
     st.header("Division Setups")
-    st.write("Set day permissions. Options: 'Any', '8:00 pm only', '9:00 pm only', or 'Unavailable'.")
-    
     def create_default_df(prefix, count=10):
         return pd.DataFrame({
             "Team Name": [f"{prefix} Team {i+1}" for i in range(count)],
@@ -300,10 +288,9 @@ with tab3:
 
 with tab4:
     st.header("Generate Schedule")
-    st.write("Ensure all constraints are accurate before running. The engine will search millions of permutations to fit both divisions.")
     
     if st.button("Run Optimisation Engine", type="primary"):
-        with st.spinner("Calculating... This may take up to 2 minutes due to the complexity of two divisions."):
+        with st.spinner("Calculating..."):
             scheduler = ABMSchedulerEngine(
                 div1_edited, div2_edited, available_weeks, 
                 matches_per_pair=matches_per_pair,
@@ -315,7 +302,24 @@ with tab4:
             if schedule_data:
                 st.success("Success! Here is the finalised schedule.")
                 df = pd.DataFrame(schedule_data)
-                df = df.sort_values(by=["Date", "Day/Time", "Alley"])
+                
+                # Sort chronologically, then by time, then by alley
+                df = df.sort_values(by=["SortDate", "Time", "Alley"])
+                
+                # Drop the hidden sorting column and arrange in exact requested order
+                df = df[["Date", "Day", "Time", "Home Team Name", "Away Team Name", "Alley", "Division"]]
+                
                 st.dataframe(df, use_container_width=True)
+                
+                # Create the CSV string
+                csv = df.to_csv(index=False).encode('utf-8')
+                
+                # Generate Download Button
+                st.download_button(
+                    label="Download Schedule as CSV",
+                    data=csv,
+                    file_name="abm_skittles_schedule.csv",
+                    mime="text/csv"
+                )
             else:
-                st.error("The engine couldn't find a solution. There are too many restrictions. Try changing some 'Unavailable' days to 'Any'.")
+                st.error("The engine couldn't find a solution. There are too many restrictions.")
