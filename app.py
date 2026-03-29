@@ -10,8 +10,52 @@ st.set_page_config(page_title="ABM Skittles Scheduler", layout="wide")
 DAY_OFFSETS = {0: 0, 1: 0, 2: 1, 3: 1, 4: 2, 5: 2, 6: 3, 7: 3}
 SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1x7NdJCc9_Wh_fRkuR_9kQ6bwEsYLqii_zKGLdvf-Dt0/export?format=csv"
 
+# --- Helper Functions for Clash Detection ---
+def get_available_slots(row):
+    slots = set([0,1,2,3,4,5,6,7])
+    days_config = {
+        'Monday': (0, 1, row.get('Monday', 'Any')),
+        'Tuesday': (2, 3, row.get('Tuesday', 'Any')),
+        'Wednesday': (4, 5, row.get('Wednesday', 'Any')),
+        'Thursday': (6, 7, row.get('Thursday', 'Any'))
+    }
+    for day, (slot_8, slot_9, config) in days_config.items():
+        if config == "Unavailable":
+            slots.discard(slot_8)
+            slots.discard(slot_9)
+        elif config == "8:00 pm only":
+            slots.discard(slot_9)
+        elif config == "9:00 pm only":
+            slots.discard(slot_8)
+    return slots
+
+def find_impossible_matchups(team_data, match_exceptions):
+    clashes = []
+    
+    def has_valid_exception(t1_name, t2_name):
+        for exc in match_exceptions:
+            if (exc['Team 1'] == t1_name and exc['Team 2'] == t2_name) or \
+               (exc['Team 1'] == t2_name and exc['Team 2'] == t1_name):
+                return True
+        return False
+
+    for div in ['Division 1', 'Division 2']:
+        div_teams = team_data[team_data['Division'] == div].reset_index(drop=True)
+        for i in range(len(div_teams)):
+            for j in range(i+1, len(div_teams)):
+                team1 = div_teams.iloc[i]
+                team2 = div_teams.iloc[j]
+                
+                t1_avail = get_available_slots(team1)
+                t2_avail = get_available_slots(team2)
+                
+                if not t1_avail.intersection(t2_avail):
+                    if not has_valid_exception(team1['Team Name'], team2['Team Name']):
+                        clashes.append((team1['Team Name'], team2['Team Name']))
+    return clashes
+
 class ABMSchedulerEngine:
-    def __init__(self, div1_data, div2_data, play_weeks, matches_per_pair, venue_blocks, team_blocks):
+    def __init__(self, div1_data, div2_data, play_weeks, matches_per_pair, venue_blocks, team_blocks, match_exceptions):
         d1 = div1_data.copy()
         d2 = div2_data.copy()
         d1['Division'] = 'Division 1'
@@ -24,6 +68,7 @@ class ABMSchedulerEngine:
         self.matches_per_pair = matches_per_pair
         self.venue_blocks = venue_blocks
         self.team_blocks = team_blocks
+        self.match_exceptions = match_exceptions
         self.num_slots = 8 
         self.num_alleys = 2
         
@@ -41,6 +86,26 @@ class ABMSchedulerEngine:
                                 self.play[(t1, t2, w, s, a)] = self.model.NewBoolVar(
                                     f'match_t{t1}_t{t2}_w{w}_s{s}_a{a}'
                                 )
+
+    def get_overridden_slots(self, t1_name, t2_name):
+        # Extracts allowed override slots for a specific pair of teams
+        allowed = []
+        for exc in self.match_exceptions:
+            if (exc['Team 1'] == t1_name and exc['Team 2'] == t2_name) or \
+               (exc['Team 1'] == t2_name and exc['Team 2'] == t1_name):
+                day = exc['Override Day']
+                time = exc['Override Time']
+                
+                day_slots = {'Monday': [0,1], 'Tuesday': [2,3], 'Wednesday': [4,5], 'Thursday': [6,7]}
+                if day in day_slots:
+                    s8, s9 = day_slots[day]
+                    if time == "Both":
+                        allowed.extend([s8, s9])
+                    elif time == "8:00 pm":
+                        allowed.append(s8)
+                    elif time == "9:00 pm":
+                        allowed.append(s9)
+        return allowed
 
     def add_constraints(self):
         # 1. Total Matches & Exact Home/Away Balance per Pair
@@ -113,8 +178,10 @@ class ABMSchedulerEngine:
             self.model.Add(sum(away_alley_0) - sum(away_alley_1) <= 2)
             self.model.Add(sum(away_alley_1) - sum(away_alley_0) <= 2)
 
-        # 5. Process Day/Time Preferences
-        for t, row in self.team_data.iterrows():
+        # 5. Process Day/Time Preferences (With Exceptions Punched Through)
+        for t in range(self.num_teams):
+            t_name = self.team_data.iloc[t]['Team Name']
+            row = self.team_data.iloc[t]
             days_config = {
                 'Monday': (0, 1, row['Monday']),
                 'Tuesday': (2, 3, row['Tuesday']),
@@ -133,11 +200,16 @@ class ABMSchedulerEngine:
                 if slots_to_block:
                     for t2 in range(self.num_teams):
                         if t != t2 and (t, t2, 0, 0, 0) in self.play:
+                            t2_name = self.team_data.iloc[t2]['Team Name']
+                            overridden = self.get_overridden_slots(t_name, t2_name)
+                            
                             for w in range(self.num_weeks):
                                 for s in slots_to_block:
-                                    for a in range(self.num_alleys):
-                                        self.model.Add(self.play[(t, t2, w, s, a)] == 0)
-                                        self.model.Add(self.play[(t2, t, w, s, a)] == 0)
+                                    # Only block the slot if it HAS NOT been explicitly allowed by an exception
+                                    if s not in overridden:
+                                        for a in range(self.num_alleys):
+                                            self.model.Add(self.play[(t, t2, w, s, a)] == 0)
+                                            self.model.Add(self.play[(t2, t, w, s, a)] == 0)
 
         # 6. Process Specific Date Blocks
         for w in range(self.num_weeks):
@@ -167,14 +239,12 @@ class ABMSchedulerEngine:
 
         # 7. Soft Preferences & Anti-Clumping
         penalties = []
-        
-        # A. Pre-calculate team presence in each day to avoid code repetition
         team_day_vars = {}
         for t in range(self.num_teams):
             for w in range(self.num_weeks):
-                for d in range(4): # 4 days
+                for d in range(4):
                     matches_this_day = []
-                    for s in [d*2, d*2+1]: # Slot 8pm and 9pm for that day
+                    for s in [d*2, d*2+1]: 
                         for t2 in range(self.num_teams):
                             if t != t2 and (t, t2, w, s, 0) in self.play:
                                 for a in range(self.num_alleys):
@@ -182,18 +252,14 @@ class ABMSchedulerEngine:
                                     matches_this_day.append(self.play[(t2, t, w, s, a)])
                     team_day_vars[(t, w, d)] = sum(matches_this_day)
 
-        # B. Anti-Clumping Rule: Penalise playing on the same day in any 3-week rolling window
         for t in range(self.num_teams):
             for w in range(self.num_weeks - 2):
                 for d in range(4):
                     window_sum = team_day_vars[(t, w, d)] + team_day_vars[(t, w+1, d)] + team_day_vars[(t, w+2, d)]
                     penalty_var = self.model.NewIntVar(0, 3, f'pen_clump_t{t}_w{w}_d{d}')
-                    # If window_sum > 1, penalty_var will be forced to be > 0.
                     self.model.Add(penalty_var >= window_sum - 1)
-                    # We add this twice to give it a strong weight, ensuring the engine takes it seriously
                     penalties.extend([penalty_var, penalty_var])
 
-        # C. Soft Time Preferences
         for t, row in self.team_data.iterrows():
             pref = row['Prefers Time']
             if pref == "8:00 pm":
@@ -202,7 +268,6 @@ class ABMSchedulerEngine:
                         for w in range(self.num_weeks):
                             for s in [1, 3, 5, 7]: 
                                 for a in range(self.num_alleys):
-                                    # Added twice to give it equal weight to the anti-clumping rule
                                     penalties.extend([self.play[(t, t2, w, s, a)], self.play[(t2, t, w, s, a)], 
                                                       self.play[(t, t2, w, s, a)], self.play[(t2, t, w, s, a)]])
             elif pref == "9:00 pm":
@@ -219,7 +284,6 @@ class ABMSchedulerEngine:
     def solve(self):
         self.add_constraints()
         solver = cp_model.CpSolver()
-        # Increased to 4 mins as anti-clumping adds millions of new variables
         solver.parameters.max_time_in_seconds = 240.0 
         status = solver.Solve(self.model)
         
@@ -275,6 +339,8 @@ if 'venue_blocks' not in st.session_state:
     st.session_state.venue_blocks = []
 if 'team_blocks' not in st.session_state:
     st.session_state.team_blocks = []
+if 'match_exceptions' not in st.session_state:
+    st.session_state.match_exceptions = []
 if 'div1_data' not in st.session_state:
     st.session_state.div1_data = create_default_df("D1", 10)
 if 'div2_data' not in st.session_state:
@@ -283,7 +349,7 @@ if 'div2_data' not in st.session_state:
 # --- User Interface ---
 st.title("ABM Skittles Scheduler")
 
-tab1, tab2, tab3, tab4 = st.tabs(["1. Calendar & Rules", "2. Venue Exceptions", "3. Teams & Preferences", "4. Generate"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["1. Calendar", "2. Venue Blocks", "3. Teams", "4. Clash Checker", "5. Generate"])
 
 with tab1:
     st.header("Season Parameters")
@@ -304,7 +370,6 @@ with tab1:
 
 with tab2:
     st.header("Venue & Specific Date Blockers")
-    st.write("Add new exceptions via the inputs, or directly edit/delete existing rows in the tables below.")
     col_a, col_b = st.columns(2)
     
     with col_a:
@@ -317,20 +382,10 @@ with tab2:
             
         if st.session_state.venue_blocks:
             v_df = pd.DataFrame(st.session_state.venue_blocks)
-            edited_v_df = st.data_editor(
-                v_df, 
-                num_rows="dynamic", 
-                column_config={"Date": st.column_config.DateColumn("Date")},
-                key="v_editor",
-                use_container_width=True
-            )
+            edited_v_df = st.data_editor(v_df, num_rows="dynamic", column_config={"Date": st.column_config.DateColumn("Date")}, key="v_editor", use_container_width=True)
             if not edited_v_df.empty:
                 edited_v_df['Date'] = pd.to_datetime(edited_v_df['Date']).dt.date
             st.session_state.venue_blocks = edited_v_df.to_dict('records')
-            
-            if st.button("Clear All Venue Blocks"):
-                st.session_state.venue_blocks = []
-                st.rerun()
 
     with col_b:
         st.subheader("Add Specific Team Block")
@@ -343,20 +398,10 @@ with tab2:
                 
         if st.session_state.team_blocks:
             t_df = pd.DataFrame(st.session_state.team_blocks)
-            edited_t_df = st.data_editor(
-                t_df, 
-                num_rows="dynamic", 
-                column_config={"Date": st.column_config.DateColumn("Date")},
-                key="t_editor",
-                use_container_width=True
-            )
+            edited_t_df = st.data_editor(t_df, num_rows="dynamic", column_config={"Date": st.column_config.DateColumn("Date")}, key="t_editor", use_container_width=True)
             if not edited_t_df.empty:
                 edited_t_df['Date'] = pd.to_datetime(edited_t_df['Date']).dt.date
             st.session_state.team_blocks = edited_t_df.to_dict('records')
-            
-            if st.button("Clear All Team Blocks"):
-                st.session_state.team_blocks = []
-                st.rerun()
 
 with tab3:
     st.header("Division Setups & Import")
@@ -385,13 +430,11 @@ with tab3:
             for _, row in df_import.iterrows():
                 dates_str = row.get('Specific Unavailable Dates', '')
                 t_name = row['Team Name']
-                
                 if pd.notna(dates_str) and str(dates_str).strip():
                     raw_dates = re.split(r'[,\n]+', str(dates_str))
                     for rd in raw_dates:
                         rd = rd.strip()
                         if not rd: continue
-                        
                         try:
                             p_date = datetime.datetime.strptime(rd, "%d/%m/%y").date()
                             parsed_blocks.append({"Date": p_date, "Team": t_name})
@@ -401,14 +444,11 @@ with tab3:
                                 parsed_blocks.append({"Date": p_date, "Team": t_name})
                             except ValueError:
                                 st.warning(f"Could not automatically read date '{rd}' for team '{t_name}'. Please add it manually in Tab 2.")
-            
             st.session_state.team_blocks.extend(parsed_blocks)
-            st.success("Data successfully synced! Captains' preferences and specific dates have been loaded.")
-            
+            st.success("Data successfully synced!")
         except Exception as e:
-            st.error(f"Failed to fetch data. Ensure the Google Sheet is shared publicly. Error: {e}")
+            st.error(f"Failed to fetch data. Error: {e}")
 
-    st.write("Review or manually edit the team details below.")
     day_options = ["Any", "8:00 pm only", "9:00 pm only", "Unavailable"]
     col_config = {
         "Monday": st.column_config.SelectboxColumn("Monday", options=day_options),
@@ -420,20 +460,63 @@ with tab3:
 
     st.subheader("Division 1")
     div1_edited = st.data_editor(st.session_state.div1_data, column_config=col_config, num_rows="dynamic", key="div1_ui")
-    
     st.subheader("Division 2")
     div2_edited = st.data_editor(st.session_state.div2_data, column_config=col_config, num_rows="dynamic", key="div2_ui")
 
 with tab4:
+    st.header("Clash Checker & Match Exceptions")
+    st.write("Detect if two teams have entirely incompatible schedules, and add 'wildcard' rules to bypass those blocks.")
+    
+    d1 = div1_edited.copy()
+    d2 = div2_edited.copy()
+    d1['Division'] = 'Division 1'
+    d2['Division'] = 'Division 2'
+    full_teams = pd.concat([d1, d2], ignore_index=True)
+    
+    if st.button("Check for Impossible Clashes"):
+        clashes = find_impossible_matchups(full_teams, st.session_state.match_exceptions)
+        if clashes:
+            for c in clashes:
+                st.error(f"🚨 **Mathematical Impossibility:** **{c[0]}** and **{c[1]}** have no common available days. The schedule will fail unless you add an exception below.")
+        else:
+            st.success("✅ No impossible clashes detected! All teams have at least one valid slot to play each other.")
+            
+    st.markdown("---")
+    st.subheader("Add a Match Exception")
+    col_e1, col_e2 = st.columns(2)
+    with col_e1:
+        exc_t1 = st.selectbox("Team 1", full_teams['Team Name'].tolist())
+        exc_day = st.selectbox("Override Day", ["Monday", "Tuesday", "Wednesday", "Thursday"])
+    with col_e2:
+        exc_t2 = st.selectbox("Team 2", full_teams['Team Name'].tolist())
+        exc_time = st.selectbox("Override Time", ["Both", "8:00 pm", "9:00 pm"])
+        
+    if st.button("Add Exception"):
+        if exc_t1 != exc_t2:
+            st.session_state.match_exceptions.append({
+                "Team 1": exc_t1, "Team 2": exc_t2,
+                "Override Day": exc_day, "Override Time": exc_time
+            })
+            st.rerun()
+        else:
+            st.error("Please select two different teams.")
+            
+    if st.session_state.match_exceptions:
+        exc_df = pd.DataFrame(st.session_state.match_exceptions)
+        edited_exc_df = st.data_editor(exc_df, num_rows="dynamic", key="exc_editor", use_container_width=True)
+        st.session_state.match_exceptions = edited_exc_df.to_dict('records')
+
+with tab5:
     st.header("Generate Schedule")
     
     if st.button("Run Optimisation Engine", type="primary"):
-        with st.spinner("Calculating... Note: Equalising home/away across alleys and actively preventing teams playing back-to-back days takes immense math. It may take up to 4 minutes."):
+        with st.spinner("Calculating..."):
             scheduler = ABMSchedulerEngine(
                 div1_edited, div2_edited, available_weeks, 
                 matches_per_pair=matches_per_pair,
                 venue_blocks=st.session_state.venue_blocks,
-                team_blocks=st.session_state.team_blocks
+                team_blocks=st.session_state.team_blocks,
+                match_exceptions=st.session_state.match_exceptions
             )
             schedule_data = scheduler.solve()
             
@@ -447,12 +530,6 @@ with tab4:
                 st.dataframe(df, use_container_width=True)
                 
                 csv = df.to_csv(index=False).encode('utf-8')
-                
-                st.download_button(
-                    label="Download Schedule as CSV",
-                    data=csv,
-                    file_name="abm_skittles_schedule.csv",
-                    mime="text/csv"
-                )
+                st.download_button(label="Download Schedule as CSV", data=csv, file_name="abm_skittles_schedule.csv", mime="text/csv")
             else:
-                st.error("The engine couldn't find a solution. There are too many restrictions locking the math up. Try relaxing some team availability.")
+                st.error("The engine couldn't find a solution. There are too many restrictions locking the math up.")
