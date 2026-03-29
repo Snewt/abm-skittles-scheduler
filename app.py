@@ -6,7 +6,6 @@ from ortools.sat.python import cp_model
 st.set_page_config(page_title="ABM Skittles Scheduler", layout="wide")
 
 # --- Constants & Mappings ---
-# Maps slot IDs to the number of days past Monday
 DAY_OFFSETS = {0: 0, 1: 0, 2: 1, 3: 1, 4: 2, 5: 2, 6: 3, 7: 3}
 
 class ABMSchedulerEngine:
@@ -169,7 +168,9 @@ class ABMSchedulerEngine:
             for w in range(self.num_weeks):
                 for s in range(self.num_slots):
                     match_date = self.play_weeks[w] + datetime.timedelta(days=DAY_OFFSETS[s])
-                    day_name = match_date.strftime("%A")
+                    
+                    # Updated to %a for three-letter day format (e.g., Mon, Tue)
+                    day_name = match_date.strftime("%a")
                     time_str = "8:00 pm" if s % 2 == 0 else "9:00 pm"
                     
                     for a in range(self.num_alleys):
@@ -177,7 +178,7 @@ class ABMSchedulerEngine:
                             for t2 in range(self.num_teams):
                                 if (t1, t2, w, s, a) in self.play and solver.Value(self.play[(t1, t2, w, s, a)]) == 1:
                                     results.append({
-                                        "SortDate": match_date, # Hidden column for accurate sorting
+                                        "SortDate": match_date,
                                         "Date": match_date.strftime("%d %b %Y"),
                                         "Day": day_name,
                                         "Time": time_str,
@@ -261,7 +262,15 @@ with tab2:
 
 with tab3:
     st.header("Division Setups")
-    def create_default_df(prefix, count=10):
+    
+    # Dynamic Team Counters
+    col_d1, col_d2 = st.columns(2)
+    with col_d1:
+        num_div1 = st.number_input("Number of Teams in Division 1", min_value=2, max_value=20, value=10)
+    with col_d2:
+        num_div2 = st.number_input("Number of Teams in Division 2", min_value=2, max_value=20, value=10)
+
+    def create_default_df(prefix, count):
         return pd.DataFrame({
             "Team Name": [f"{prefix} Team {i+1}" for i in range(count)],
             "Monday": ["Any"] * count,
@@ -281,10 +290,10 @@ with tab3:
     }
 
     st.subheader("Division 1")
-    div1_edited = st.data_editor(create_default_df("D1"), column_config=col_config, num_rows="dynamic", key="div1")
+    div1_edited = st.data_editor(create_default_df("D1", num_div1), column_config=col_config, num_rows="dynamic", key="div1")
     
     st.subheader("Division 2")
-    div2_edited = st.data_editor(create_default_df("D2"), column_config=col_config, num_rows="dynamic", key="div2")
+    div2_edited = st.data_editor(create_default_df("D2", num_div2), column_config=col_config, num_rows="dynamic", key="div2")
 
 with tab4:
     st.header("Generate Schedule")
@@ -303,18 +312,13 @@ with tab4:
                 st.success("Success! Here is the finalised schedule.")
                 df = pd.DataFrame(schedule_data)
                 
-                # Sort chronologically, then by time, then by alley
                 df = df.sort_values(by=["SortDate", "Time", "Alley"])
-                
-                # Drop the hidden sorting column and arrange in exact requested order
                 df = df[["Date", "Day", "Time", "Home Team Name", "Away Team Name", "Alley", "Division"]]
                 
                 st.dataframe(df, use_container_width=True)
                 
-                # Create the CSV string
                 csv = df.to_csv(index=False).encode('utf-8')
                 
-                # Generate Download Button
                 st.download_button(
                     label="Download Schedule as CSV",
                     data=csv,
