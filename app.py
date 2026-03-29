@@ -436,7 +436,6 @@ if check_password():
     with tab3:
         st.header("Division Setups & Import")
         
-        # New Text Input for the CSV Link
         default_url = "https://docs.google.com/spreadsheets/d/1x7NdJCc9_Wh_fRkuR_9kQ6bwEsYLqii_zKGLdvf-Dt0/export?format=csv"
         user_sheet_url = st.text_input("Google Sheet CSV Export Link:", value=default_url)
         
@@ -450,7 +449,7 @@ if check_password():
                         return pd.DataFrame()
                     res = pd.DataFrame()
                     res['Playing?'] = True 
-                    res['Playing?'] = res['Playing?'].astype(bool) # Explicitly force boolean format
+                    res['Playing?'] = res['Playing?'].astype(bool) 
                     res['Team Name'] = div_df['Team Name']
                     res['Monday'] = div_df['Monday']
                     res['Tuesday'] = div_df['Tuesday']
@@ -461,6 +460,11 @@ if check_password():
 
                 st.session_state.div1_data = extract_division(df_import, 'Division 1')
                 st.session_state.div2_data = extract_division(df_import, 'Division 2')
+                
+                if "div1_ui" in st.session_state:
+                    del st.session_state["div1_ui"]
+                if "div2_ui" in st.session_state:
+                    del st.session_state["div2_ui"]
                 
                 parsed_blocks = []
                 for _, row in df_import.iterrows():
