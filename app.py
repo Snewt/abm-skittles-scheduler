@@ -30,7 +30,6 @@ def check_password():
 if check_password():
     # --- Constants & Mappings ---
     DAY_OFFSETS = {0: 0, 1: 0, 2: 1, 3: 1, 4: 2, 5: 2, 6: 3, 7: 3}
-    SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1x7NdJCc9_Wh_fRkuR_9kQ6bwEsYLqii_zKGLdvf-Dt0/export?format=csv"
 
     # --- Helper Functions for Clash Detection ---
     def get_available_slots(row):
@@ -79,7 +78,6 @@ if check_password():
 
     class ABMSchedulerEngine:
         def __init__(self, div1_data, div2_data, play_weeks, matches_per_pair, venue_blocks, team_blocks, match_exceptions, num_divisions, num_alleys):
-            # Filter out teams that are not playing in this specific league format
             d1 = div1_data[div1_data['Playing?'] == True].copy()
             d1['Division'] = 'Division 1'
             
@@ -135,7 +133,6 @@ if check_password():
             return allowed
 
         def add_constraints(self):
-            # 1. Total Matches & Exact Home/Away Balance per Pair
             for t1 in range(self.num_teams):
                 for t2 in range(t1 + 1, self.num_teams):
                     if self.team_data.iloc[t1]['Division'] == self.team_data.iloc[t2]['Division']:
@@ -151,7 +148,6 @@ if check_password():
                             self.model.Add(matches_t1_home - matches_t2_home <= 1)
                             self.model.Add(matches_t2_home - matches_t1_home <= 1)
             
-            # 2. Match Frequency
             for t in range(self.num_teams):
                 for w in range(self.num_weeks):
                     weekly_matches = []
@@ -163,7 +159,6 @@ if check_password():
                                     weekly_matches.append(self.play[(t2, t, w, s, a)])
                     self.model.Add(sum(weekly_matches) <= 1)
 
-            # 3. Double Booking
             for w in range(self.num_weeks):
                 for s in range(self.num_slots):
                     for a in range(self.num_alleys):
@@ -174,7 +169,6 @@ if check_password():
                                     slot_matches.append(self.play[(t1, t2, w, s, a)])
                         self.model.Add(sum(slot_matches) <= 1)
 
-            # 4. Global Home/Away & Alley Balancing
             for t in range(self.num_teams):
                 home_alley_0 = []
                 home_alley_1 = []
@@ -197,7 +191,6 @@ if check_password():
                 self.model.Add(total_home - total_away <= 1)
                 self.model.Add(total_away - total_home <= 1)
                 
-                # Only apply alley equalisation if there are actually two alleys in use
                 if self.num_alleys == 2:
                     total_alley_0 = sum(home_alley_0) + sum(away_alley_0)
                     total_alley_1 = sum(home_alley_1) + sum(away_alley_1)
@@ -209,7 +202,6 @@ if check_password():
                     self.model.Add(sum(away_alley_0) - sum(away_alley_1) <= 2)
                     self.model.Add(sum(away_alley_1) - sum(away_alley_0) <= 2)
 
-            # 5. Process Day/Time Preferences (With Exceptions Punched Through)
             for t in range(self.num_teams):
                 t_name = self.team_data.iloc[t]['Team Name']
                 row = self.team_data.iloc[t]
@@ -241,7 +233,6 @@ if check_password():
                                                 self.model.Add(self.play[(t, t2, w, s, a)] == 0)
                                                 self.model.Add(self.play[(t2, t, w, s, a)] == 0)
 
-            # 6. Process Specific Date Blocks
             for w in range(self.num_weeks):
                 week_start = self.play_weeks[w]
                 for s in range(self.num_slots):
@@ -268,7 +259,6 @@ if check_password():
                                                 self.model.Add(self.play[(t, t2, w, s, a)] == 0)
                                                 self.model.Add(self.play[(t2, t, w, s, a)] == 0)
 
-            # 7. Soft Preferences & Anti-Clumping
             penalties = []
             team_day_vars = {}
             for t in range(self.num_teams):
@@ -446,16 +436,21 @@ if check_password():
     with tab3:
         st.header("Division Setups & Import")
         
+        # New Text Input for the CSV Link
+        default_url = "https://docs.google.com/spreadsheets/d/1x7NdJCc9_Wh_fRkuR_9kQ6bwEsYLqii_zKGLdvf-Dt0/export?format=csv"
+        user_sheet_url = st.text_input("Google Sheet CSV Export Link:", value=default_url)
+        
         if st.button("🔄 Sync with Google Sheets Form", type="primary"):
             try:
-                df_import = pd.read_csv(SHEET_CSV_URL)
+                df_import = pd.read_csv(user_sheet_url)
                 
                 def extract_division(df, div_name):
                     div_df = df[df['Division'] == div_name].copy()
                     if div_df.empty:
                         return pd.DataFrame()
                     res = pd.DataFrame()
-                    res['Playing?'] = True
+                    res['Playing?'] = True 
+                    res['Playing?'] = res['Playing?'].astype(bool) # Explicitly force boolean format
                     res['Team Name'] = div_df['Team Name']
                     res['Monday'] = div_df['Monday']
                     res['Tuesday'] = div_df['Tuesday']
@@ -488,7 +483,7 @@ if check_password():
                 st.session_state.team_blocks.extend(parsed_blocks)
                 st.success("Data successfully synced!")
             except Exception as e:
-                st.error(f"Failed to fetch data. Error: {e}")
+                st.error(f"Failed to fetch data. Please check the link is correct and publicly shared. Error: {e}")
 
         day_options = ["Any", "8:00 pm only", "9:00 pm only", "Unavailable"]
         col_config = {
@@ -512,7 +507,6 @@ if check_password():
     with tab4:
         st.header("Clash Checker & Match Exceptions")
         
-        # Only check the divisions that are actually playing
         d1 = div1_edited[div1_edited['Playing?'] == True].copy()
         d1['Division'] = 'Division 1'
         if ui_num_divisions == 2:
