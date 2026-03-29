@@ -51,7 +51,7 @@ if check_password():
                 slots.discard(slot_8)
         return slots
 
-    def find_impossible_matchups(team_data, match_exceptions):
+    def find_impossible_matchups(team_data, match_exceptions, num_divisions):
         clashes = []
         def has_valid_exception(t1_name, t2_name):
             for exc in match_exceptions:
@@ -60,7 +60,9 @@ if check_password():
                     return True
             return False
 
-        for div in ['Division 1', 'Division 2']:
+        divs_to_check = ['Division 1', 'Division 2'] if num_divisions == 2 else ['Division 1']
+        
+        for div in divs_to_check:
             div_teams = team_data[team_data['Division'] == div].reset_index(drop=True)
             for i in range(len(div_teams)):
                 for j in range(i+1, len(div_teams)):
@@ -76,12 +78,17 @@ if check_password():
         return clashes
 
     class ABMSchedulerEngine:
-        def __init__(self, div1_data, div2_data, play_weeks, matches_per_pair, venue_blocks, team_blocks, match_exceptions):
-            d1 = div1_data.copy()
-            d2 = div2_data.copy()
+        def __init__(self, div1_data, div2_data, play_weeks, matches_per_pair, venue_blocks, team_blocks, match_exceptions, num_divisions, num_alleys):
+            # Filter out teams that are not playing in this specific league format
+            d1 = div1_data[div1_data['Playing?'] == True].copy()
             d1['Division'] = 'Division 1'
-            d2['Division'] = 'Division 2'
-            self.team_data = pd.concat([d1, d2], ignore_index=True)
+            
+            if num_divisions == 2:
+                d2 = div2_data[div2_data['Playing?'] == True].copy()
+                d2['Division'] = 'Division 2'
+                self.team_data = pd.concat([d1, d2], ignore_index=True)
+            else:
+                self.team_data = d1.reset_index(drop=True)
             
             self.num_teams = len(self.team_data)
             self.play_weeks = play_weeks 
@@ -91,7 +98,7 @@ if check_password():
             self.team_blocks = team_blocks
             self.match_exceptions = match_exceptions
             self.num_slots = 8 
-            self.num_alleys = 2
+            self.num_alleys = num_alleys
             
             self.model = cp_model.CpModel()
             self.play = {}
@@ -178,25 +185,29 @@ if check_password():
                     if t != t2 and self.team_data.iloc[t]['Division'] == self.team_data.iloc[t2]['Division']:
                         for w in range(self.num_weeks):
                             for s in range(self.num_slots):
-                                home_alley_0.append(self.play[(t, t2, w, s, 0)])
-                                home_alley_1.append(self.play[(t, t2, w, s, 1)])
-                                away_alley_0.append(self.play[(t2, t, w, s, 0)])
-                                away_alley_1.append(self.play[(t2, t, w, s, 1)])
+                                if self.num_alleys > 0:
+                                    home_alley_0.append(self.play[(t, t2, w, s, 0)])
+                                    away_alley_0.append(self.play[(t2, t, w, s, 0)])
+                                if self.num_alleys == 2:
+                                    home_alley_1.append(self.play[(t, t2, w, s, 1)])
+                                    away_alley_1.append(self.play[(t2, t, w, s, 1)])
                 
                 total_home = sum(home_alley_0) + sum(home_alley_1)
                 total_away = sum(away_alley_0) + sum(away_alley_1)
                 self.model.Add(total_home - total_away <= 1)
                 self.model.Add(total_away - total_home <= 1)
                 
-                total_alley_0 = sum(home_alley_0) + sum(away_alley_0)
-                total_alley_1 = sum(home_alley_1) + sum(away_alley_1)
-                self.model.Add(total_alley_0 - total_alley_1 <= 1)
-                self.model.Add(total_alley_1 - total_alley_0 <= 1)
+                # Only apply alley equalisation if there are actually two alleys in use
+                if self.num_alleys == 2:
+                    total_alley_0 = sum(home_alley_0) + sum(away_alley_0)
+                    total_alley_1 = sum(home_alley_1) + sum(away_alley_1)
+                    self.model.Add(total_alley_0 - total_alley_1 <= 1)
+                    self.model.Add(total_alley_1 - total_alley_0 <= 1)
 
-                self.model.Add(sum(home_alley_0) - sum(home_alley_1) <= 2)
-                self.model.Add(sum(home_alley_1) - sum(home_alley_0) <= 2)
-                self.model.Add(sum(away_alley_0) - sum(away_alley_1) <= 2)
-                self.model.Add(sum(away_alley_1) - sum(away_alley_0) <= 2)
+                    self.model.Add(sum(home_alley_0) - sum(home_alley_1) <= 2)
+                    self.model.Add(sum(home_alley_1) - sum(home_alley_0) <= 2)
+                    self.model.Add(sum(away_alley_0) - sum(away_alley_1) <= 2)
+                    self.model.Add(sum(away_alley_1) - sum(away_alley_0) <= 2)
 
             # 5. Process Day/Time Preferences (With Exceptions Punched Through)
             for t in range(self.num_teams):
@@ -240,10 +251,11 @@ if check_password():
                         if block['Date'] == current_date:
                             alleys_to_block = [0, 1] if block['Scope'] == "Whole Club" else ([0] if block['Scope'] == "Alley 1" else [1])
                             for a in alleys_to_block:
-                                for t1 in range(self.num_teams):
-                                    for t2 in range(self.num_teams):
-                                        if (t1, t2, w, s, a) in self.play:
-                                            self.model.Add(self.play[(t1, t2, w, s, a)] == 0)
+                                if a < self.num_alleys:
+                                    for t1 in range(self.num_teams):
+                                        for t2 in range(self.num_teams):
+                                            if (t1, t2, w, s, a) in self.play:
+                                                self.model.Add(self.play[(t1, t2, w, s, a)] == 0)
 
                     for block in self.team_blocks:
                         if block['Date'] == current_date:
@@ -345,6 +357,7 @@ if check_password():
 
     def create_default_df(prefix, count):
         return pd.DataFrame({
+            "Playing?": [True] * count,
             "Team Name": [f"{prefix} Team {i+1}" for i in range(count)],
             "Monday": ["Any"] * count,
             "Tuesday": ["Any"] * count,
@@ -368,9 +381,17 @@ if check_password():
     # --- User Interface ---
     st.title("ABM Skittles Scheduler")
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["1. Calendar", "2. Venue Blocks", "3. Teams", "4. Clash Checker", "5. Generate"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["1. Calendar & Format", "2. Venue Blocks", "3. Teams", "4. Clash Checker", "5. Generate"])
 
     with tab1:
+        st.header("League Format")
+        f_col1, f_col2 = st.columns(2)
+        with f_col1:
+            ui_num_divisions = st.radio("Number of Divisions", [1, 2], index=1, horizontal=True)
+        with f_col2:
+            ui_num_alleys = st.radio("Number of Alleys", [1, 2], index=1, horizontal=True)
+            
+        st.markdown("---")
         st.header("Season Parameters")
         col1, col2 = st.columns(2)
         with col1:
@@ -434,6 +455,7 @@ if check_password():
                     if div_df.empty:
                         return pd.DataFrame()
                     res = pd.DataFrame()
+                    res['Playing?'] = True
                     res['Team Name'] = div_df['Team Name']
                     res['Monday'] = div_df['Monday']
                     res['Tuesday'] = div_df['Tuesday']
@@ -470,6 +492,7 @@ if check_password():
 
         day_options = ["Any", "8:00 pm only", "9:00 pm only", "Unavailable"]
         col_config = {
+            "Playing?": st.column_config.CheckboxColumn("Playing?", default=True),
             "Monday": st.column_config.SelectboxColumn("Monday", options=day_options),
             "Tuesday": st.column_config.SelectboxColumn("Tuesday", options=day_options),
             "Wednesday": st.column_config.SelectboxColumn("Wednesday", options=day_options),
@@ -479,20 +502,28 @@ if check_password():
 
         st.subheader("Division 1")
         div1_edited = st.data_editor(st.session_state.div1_data, column_config=col_config, num_rows="dynamic", key="div1_ui")
-        st.subheader("Division 2")
-        div2_edited = st.data_editor(st.session_state.div2_data, column_config=col_config, num_rows="dynamic", key="div2_ui")
+        
+        if ui_num_divisions == 2:
+            st.subheader("Division 2")
+            div2_edited = st.data_editor(st.session_state.div2_data, column_config=col_config, num_rows="dynamic", key="div2_ui")
+        else:
+            div2_edited = st.session_state.div2_data
 
     with tab4:
         st.header("Clash Checker & Match Exceptions")
         
-        d1 = div1_edited.copy()
-        d2 = div2_edited.copy()
+        # Only check the divisions that are actually playing
+        d1 = div1_edited[div1_edited['Playing?'] == True].copy()
         d1['Division'] = 'Division 1'
-        d2['Division'] = 'Division 2'
-        full_teams = pd.concat([d1, d2], ignore_index=True)
+        if ui_num_divisions == 2:
+            d2 = div2_edited[div2_edited['Playing?'] == True].copy()
+            d2['Division'] = 'Division 2'
+            full_teams = pd.concat([d1, d2], ignore_index=True)
+        else:
+            full_teams = d1.reset_index(drop=True)
         
         if st.button("Check for Impossible Clashes"):
-            clashes = find_impossible_matchups(full_teams, st.session_state.match_exceptions)
+            clashes = find_impossible_matchups(full_teams, st.session_state.match_exceptions, ui_num_divisions)
             if clashes:
                 for c in clashes:
                     st.error(f"🚨 **Mathematical Impossibility:** **{c[0]}** and **{c[1]}** have no common available days. The schedule will fail unless you add an exception below.")
@@ -501,28 +532,29 @@ if check_password():
                 
         st.markdown("---")
         st.subheader("Add a Match Exception")
-        col_e1, col_e2 = st.columns(2)
-        with col_e1:
-            exc_t1 = st.selectbox("Team 1", full_teams['Team Name'].tolist())
-            exc_day = st.selectbox("Override Day", ["Monday", "Tuesday", "Wednesday", "Thursday"])
-        with col_e2:
-            exc_t2 = st.selectbox("Team 2", full_teams['Team Name'].tolist())
-            exc_time = st.selectbox("Override Time", ["Both", "8:00 pm", "9:00 pm"])
-            
-        if st.button("Add Exception"):
-            if exc_t1 != exc_t2:
-                st.session_state.match_exceptions.append({
-                    "Team 1": exc_t1, "Team 2": exc_t2,
-                    "Override Day": exc_day, "Override Time": exc_time
-                })
-                st.rerun()
-            else:
-                st.error("Please select two different teams.")
+        if not full_teams.empty:
+            col_e1, col_e2 = st.columns(2)
+            with col_e1:
+                exc_t1 = st.selectbox("Team 1", full_teams['Team Name'].tolist())
+                exc_day = st.selectbox("Override Day", ["Monday", "Tuesday", "Wednesday", "Thursday"])
+            with col_e2:
+                exc_t2 = st.selectbox("Team 2", full_teams['Team Name'].tolist())
+                exc_time = st.selectbox("Override Time", ["Both", "8:00 pm", "9:00 pm"])
                 
-        if st.session_state.match_exceptions:
-            exc_df = pd.DataFrame(st.session_state.match_exceptions)
-            edited_exc_df = st.data_editor(exc_df, num_rows="dynamic", key="exc_editor", use_container_width=True)
-            st.session_state.match_exceptions = edited_exc_df.to_dict('records')
+            if st.button("Add Exception"):
+                if exc_t1 != exc_t2:
+                    st.session_state.match_exceptions.append({
+                        "Team 1": exc_t1, "Team 2": exc_t2,
+                        "Override Day": exc_day, "Override Time": exc_time
+                    })
+                    st.rerun()
+                else:
+                    st.error("Please select two different teams.")
+                    
+            if st.session_state.match_exceptions:
+                exc_df = pd.DataFrame(st.session_state.match_exceptions)
+                edited_exc_df = st.data_editor(exc_df, num_rows="dynamic", key="exc_editor", use_container_width=True)
+                st.session_state.match_exceptions = edited_exc_df.to_dict('records')
 
     with tab5:
         st.header("Generate Schedule")
@@ -534,7 +566,9 @@ if check_password():
                     matches_per_pair=matches_per_pair,
                     venue_blocks=st.session_state.venue_blocks,
                     team_blocks=st.session_state.team_blocks,
-                    match_exceptions=st.session_state.match_exceptions
+                    match_exceptions=st.session_state.match_exceptions,
+                    num_divisions=ui_num_divisions,
+                    num_alleys=ui_num_alleys
                 )
                 schedule_data = scheduler.solve()
                 
