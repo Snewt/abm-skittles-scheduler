@@ -447,16 +447,19 @@ if check_password():
                     div_df = df[df['Division'] == div_name].copy()
                     if div_df.empty:
                         return pd.DataFrame()
+                    
+                    # Reset the index BEFORE populating the new dataframe to prevent Pandas misalignment 
+                    div_df = div_df.reset_index(drop=True)
+                    
                     res = pd.DataFrame()
-                    res['Playing?'] = True 
-                    res['Playing?'] = res['Playing?'].astype(bool) 
+                    res['Playing?'] = [True] * len(div_df) # Explicit array of Trues
                     res['Team Name'] = div_df['Team Name']
                     res['Monday'] = div_df['Monday']
                     res['Tuesday'] = div_df['Tuesday']
                     res['Wednesday'] = div_df['Wednesday']
                     res['Thursday'] = div_df['Thursday']
                     res['Prefers Time'] = div_df['Prefers Time']
-                    return res.reset_index(drop=True)
+                    return res
 
                 st.session_state.div1_data = extract_division(df_import, 'Division 1')
                 st.session_state.div2_data = extract_division(df_import, 'Division 2')
