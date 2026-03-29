@@ -12,7 +12,6 @@ SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1x7NdJCc9_Wh_fRkuR_9kQ6b
 
 class ABMSchedulerEngine:
     def __init__(self, div1_data, div2_data, play_weeks, matches_per_pair, venue_blocks, team_blocks):
-        # We make a copy to avoid altering the session state data directly
         d1 = div1_data.copy()
         d2 = div2_data.copy()
         d1['Division'] = 'Division 1'
@@ -44,16 +43,25 @@ class ABMSchedulerEngine:
                                 )
 
     def add_constraints(self):
-        # 1. Total Matches 
+        # 1. Total Matches & Exact Home/Away Balance per Pair
         for t1 in range(self.num_teams):
             for t2 in range(t1 + 1, self.num_teams):
                 if self.team_data.iloc[t1]['Division'] == self.team_data.iloc[t2]['Division']:
-                    self.model.Add(sum(
-                        self.play[(t1, t2, w, s, a)] + self.play[(t2, t1, w, s, a)]
-                        for w in range(self.num_weeks) for s in range(self.num_slots) for a in range(self.num_alleys)
-                    ) == self.matches_per_pair)
+                    matches_t1_home = sum(self.play[(t1, t2, w, s, a)] for w in range(self.num_weeks) for s in range(self.num_slots) for a in range(self.num_alleys))
+                    matches_t2_home = sum(self.play[(t2, t1, w, s, a)] for w in range(self.num_weeks) for s in range(self.num_slots) for a in range(self.num_alleys))
+                    
+                    # They must play the correct total number of times
+                    self.model.Add(matches_t1_home + matches_t2_home == self.matches_per_pair)
+                    
+                    # Force a fair home/away split between the two specific teams
+                    if self.matches_per_pair % 2 == 0:
+                        self.model.Add(matches_t1_home == self.matches_per_pair // 2)
+                        self.model.Add(matches_t2_home == self.matches_per_pair // 2)
+                    else:
+                        self.model.Add(matches_t1_home - matches_t2_home <= 1)
+                        self.model.Add(matches_t2_home - matches_t1_home <= 1)
         
-        # 2. Match Frequency 
+        # 2. Match Frequency (Max 1 per week per team)
         for t in range(self.num_teams):
             for w in range(self.num_weeks):
                 weekly_matches = []
@@ -65,7 +73,7 @@ class ABMSchedulerEngine:
                                 weekly_matches.append(self.play[(t2, t, w, s, a)])
                 self.model.Add(sum(weekly_matches) <= 1)
 
-        # 3. Double Booking
+        # 3. Double Booking (Only 1 match per slot per alley globally)
         for w in range(self.num_weeks):
             for s in range(self.num_slots):
                 for a in range(self.num_alleys):
@@ -76,18 +84,40 @@ class ABMSchedulerEngine:
                                 slot_matches.append(self.play[(t1, t2, w, s, a)])
                     self.model.Add(sum(slot_matches) <= 1)
 
-        # 4. Equal Alley Usage
+        # 4. Global Home/Away & Alley Balancing
         for t in range(self.num_teams):
-            alley_0_matches = []
-            alley_1_matches = []
+            home_alley_0 = []
+            home_alley_1 = []
+            away_alley_0 = []
+            away_alley_1 = []
+            
             for t2 in range(self.num_teams):
                 if t != t2 and self.team_data.iloc[t]['Division'] == self.team_data.iloc[t2]['Division']:
                     for w in range(self.num_weeks):
                         for s in range(self.num_slots):
-                            alley_0_matches.extend([self.play[(t, t2, w, s, 0)], self.play[(t2, t, w, s, 0)]])
-                            alley_1_matches.extend([self.play[(t, t2, w, s, 1)], self.play[(t2, t, w, s, 1)]])
-            self.model.Add(sum(alley_0_matches) - sum(alley_1_matches) <= 1)
-            self.model.Add(sum(alley_1_matches) - sum(alley_0_matches) <= 1)
+                            home_alley_0.append(self.play[(t, t2, w, s, 0)])
+                            home_alley_1.append(self.play[(t, t2, w, s, 1)])
+                            away_alley_0.append(self.play[(t2, t, w, s, 0)])
+                            away_alley_1.append(self.play[(t2, t, w, s, 1)])
+            
+            # Overall Home vs Away must be equal (or difference of 1)
+            total_home = sum(home_alley_0) + sum(home_alley_1)
+            total_away = sum(away_alley_0) + sum(away_alley_1)
+            self.model.Add(total_home - total_away <= 1)
+            self.model.Add(total_away - total_home <= 1)
+            
+            # Overall Alley 1 vs Alley 2 must be equal (or difference of 1)
+            total_alley_0 = sum(home_alley_0) + sum(away_alley_0)
+            total_alley_1 = sum(home_alley_1) + sum(away_alley_1)
+            self.model.Add(total_alley_0 - total_alley_1 <= 1)
+            self.model.Add(total_alley_1 - total_alley_0 <= 1)
+
+            # Granular checks: Ensure home and away fixtures are distributed across both alleys
+            # We use <= 2 here to give the solver a tiny bit of breathing room so it doesn't crash on impossible combinations
+            self.model.Add(sum(home_alley_0) - sum(home_alley_1) <= 2)
+            self.model.Add(sum(home_alley_1) - sum(home_alley_0) <= 2)
+            self.model.Add(sum(away_alley_0) - sum(away_alley_1) <= 2)
+            self.model.Add(sum(away_alley_1) - sum(away_alley_0) <= 2)
 
         # 5. Process Day/Time Preferences
         for t, row in self.team_data.iterrows():
@@ -165,7 +195,8 @@ class ABMSchedulerEngine:
     def solve(self):
         self.add_constraints()
         solver = cp_model.CpSolver()
-        solver.parameters.max_time_in_seconds = 120.0 
+        # Increased time limit to 3 minutes as the equal home/away logic significantly increases mathematical complexity
+        solver.parameters.max_time_in_seconds = 180.0 
         status = solver.Solve(self.model)
         
         results = []
@@ -284,7 +315,6 @@ with tab3:
         try:
             df_import = pd.read_csv(SHEET_CSV_URL)
             
-            # Helper to extract the core columns smoothly
             def extract_division(df, div_name):
                 div_df = df[df['Division'] == div_name].copy()
                 if div_df.empty:
@@ -301,34 +331,28 @@ with tab3:
             st.session_state.div1_data = extract_division(df_import, 'Division 1')
             st.session_state.div2_data = extract_division(df_import, 'Division 2')
             
-            # The Magic Date Parser: Splitting dates and converting them
             parsed_blocks = []
             for _, row in df_import.iterrows():
                 dates_str = row.get('Specific Unavailable Dates', '')
                 t_name = row['Team Name']
                 
                 if pd.notna(dates_str) and str(dates_str).strip():
-                    # Split on commas or line breaks if they put multiple dates
                     raw_dates = re.split(r'[,\n]+', str(dates_str))
                     for rd in raw_dates:
                         rd = rd.strip()
                         if not rd: continue
                         
                         try:
-                            # Try dd/mm/yy parsing
                             p_date = datetime.datetime.strptime(rd, "%d/%m/%y").date()
                             parsed_blocks.append({"Date": p_date, "Team": t_name})
                         except ValueError:
                             try:
-                                # Just in case a captain types the full 2026 year
                                 p_date = datetime.datetime.strptime(rd, "%d/%m/%Y").date()
                                 parsed_blocks.append({"Date": p_date, "Team": t_name})
                             except ValueError:
                                 st.warning(f"Could not automatically read date '{rd}' for team '{t_name}'. Please add it manually in Tab 2.")
             
-            # Add these successfully parsed dates into the background database
             st.session_state.team_blocks.extend(parsed_blocks)
-            
             st.success("Data successfully synced! Captains' preferences and specific dates have been loaded.")
             
         except Exception as e:
@@ -354,7 +378,7 @@ with tab4:
     st.header("Generate Schedule")
     
     if st.button("Run Optimisation Engine", type="primary"):
-        with st.spinner("Calculating..."):
+        with st.spinner("Calculating... Note: Equalising home/away across alleys makes this significantly harder for the engine. It may take up to 3 minutes."):
             scheduler = ABMSchedulerEngine(
                 div1_edited, div2_edited, available_weeks, 
                 matches_per_pair=matches_per_pair,
@@ -381,4 +405,4 @@ with tab4:
                     mime="text/csv"
                 )
             else:
-                st.error("The engine couldn't find a solution. There are too many restrictions.")
+                st.error("The engine couldn't find a solution. There are too many restrictions locking the math up. Try relaxing some team availability.")
