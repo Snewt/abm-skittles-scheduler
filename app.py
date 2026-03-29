@@ -165,8 +165,35 @@ class ABMSchedulerEngine:
                                             self.model.Add(self.play[(t, t2, w, s, a)] == 0)
                                             self.model.Add(self.play[(t2, t, w, s, a)] == 0)
 
-        # 7. Soft Preferences
+        # 7. Soft Preferences & Anti-Clumping
         penalties = []
+        
+        # A. Pre-calculate team presence in each day to avoid code repetition
+        team_day_vars = {}
+        for t in range(self.num_teams):
+            for w in range(self.num_weeks):
+                for d in range(4): # 4 days
+                    matches_this_day = []
+                    for s in [d*2, d*2+1]: # Slot 8pm and 9pm for that day
+                        for t2 in range(self.num_teams):
+                            if t != t2 and (t, t2, w, s, 0) in self.play:
+                                for a in range(self.num_alleys):
+                                    matches_this_day.append(self.play[(t, t2, w, s, a)])
+                                    matches_this_day.append(self.play[(t2, t, w, s, a)])
+                    team_day_vars[(t, w, d)] = sum(matches_this_day)
+
+        # B. Anti-Clumping Rule: Penalise playing on the same day in any 3-week rolling window
+        for t in range(self.num_teams):
+            for w in range(self.num_weeks - 2):
+                for d in range(4):
+                    window_sum = team_day_vars[(t, w, d)] + team_day_vars[(t, w+1, d)] + team_day_vars[(t, w+2, d)]
+                    penalty_var = self.model.NewIntVar(0, 3, f'pen_clump_t{t}_w{w}_d{d}')
+                    # If window_sum > 1, penalty_var will be forced to be > 0.
+                    self.model.Add(penalty_var >= window_sum - 1)
+                    # We add this twice to give it a strong weight, ensuring the engine takes it seriously
+                    penalties.extend([penalty_var, penalty_var])
+
+        # C. Soft Time Preferences
         for t, row in self.team_data.iterrows():
             pref = row['Prefers Time']
             if pref == "8:00 pm":
@@ -175,21 +202,25 @@ class ABMSchedulerEngine:
                         for w in range(self.num_weeks):
                             for s in [1, 3, 5, 7]: 
                                 for a in range(self.num_alleys):
-                                    penalties.extend([self.play[(t, t2, w, s, a)], self.play[(t2, t, w, s, a)]])
+                                    # Added twice to give it equal weight to the anti-clumping rule
+                                    penalties.extend([self.play[(t, t2, w, s, a)], self.play[(t2, t, w, s, a)], 
+                                                      self.play[(t, t2, w, s, a)], self.play[(t2, t, w, s, a)]])
             elif pref == "9:00 pm":
                 for t2 in range(self.num_teams):
                     if t != t2 and (t, t2, 0, 0, 0) in self.play:
                         for w in range(self.num_weeks):
                             for s in [0, 2, 4, 6]: 
                                 for a in range(self.num_alleys):
-                                    penalties.extend([self.play[(t, t2, w, s, a)], self.play[(t2, t, w, s, a)]])
+                                    penalties.extend([self.play[(t, t2, w, s, a)], self.play[(t2, t, w, s, a)],
+                                                      self.play[(t, t2, w, s, a)], self.play[(t2, t, w, s, a)]])
         
         self.model.Minimize(sum(penalties))
 
     def solve(self):
         self.add_constraints()
         solver = cp_model.CpSolver()
-        solver.parameters.max_time_in_seconds = 180.0 
+        # Increased to 4 mins as anti-clumping adds millions of new variables
+        solver.parameters.max_time_in_seconds = 240.0 
         status = solver.Solve(self.model)
         
         results = []
@@ -293,7 +324,6 @@ with tab2:
                 key="v_editor",
                 use_container_width=True
             )
-            # Safely clean up date formats and save back
             if not edited_v_df.empty:
                 edited_v_df['Date'] = pd.to_datetime(edited_v_df['Date']).dt.date
             st.session_state.venue_blocks = edited_v_df.to_dict('records')
@@ -398,7 +428,7 @@ with tab4:
     st.header("Generate Schedule")
     
     if st.button("Run Optimisation Engine", type="primary"):
-        with st.spinner("Calculating... Note: Equalising home/away across alleys makes this significantly harder for the engine. It may take up to 3 minutes."):
+        with st.spinner("Calculating... Note: Equalising home/away across alleys and actively preventing teams playing back-to-back days takes immense math. It may take up to 4 minutes."):
             scheduler = ABMSchedulerEngine(
                 div1_edited, div2_edited, available_weeks, 
                 matches_per_pair=matches_per_pair,
