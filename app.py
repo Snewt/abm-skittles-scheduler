@@ -50,10 +50,8 @@ class ABMSchedulerEngine:
                     matches_t1_home = sum(self.play[(t1, t2, w, s, a)] for w in range(self.num_weeks) for s in range(self.num_slots) for a in range(self.num_alleys))
                     matches_t2_home = sum(self.play[(t2, t1, w, s, a)] for w in range(self.num_weeks) for s in range(self.num_slots) for a in range(self.num_alleys))
                     
-                    # They must play the correct total number of times
                     self.model.Add(matches_t1_home + matches_t2_home == self.matches_per_pair)
                     
-                    # Force a fair home/away split between the two specific teams
                     if self.matches_per_pair % 2 == 0:
                         self.model.Add(matches_t1_home == self.matches_per_pair // 2)
                         self.model.Add(matches_t2_home == self.matches_per_pair // 2)
@@ -61,7 +59,7 @@ class ABMSchedulerEngine:
                         self.model.Add(matches_t1_home - matches_t2_home <= 1)
                         self.model.Add(matches_t2_home - matches_t1_home <= 1)
         
-        # 2. Match Frequency (Max 1 per week per team)
+        # 2. Match Frequency
         for t in range(self.num_teams):
             for w in range(self.num_weeks):
                 weekly_matches = []
@@ -73,7 +71,7 @@ class ABMSchedulerEngine:
                                 weekly_matches.append(self.play[(t2, t, w, s, a)])
                 self.model.Add(sum(weekly_matches) <= 1)
 
-        # 3. Double Booking (Only 1 match per slot per alley globally)
+        # 3. Double Booking
         for w in range(self.num_weeks):
             for s in range(self.num_slots):
                 for a in range(self.num_alleys):
@@ -100,20 +98,16 @@ class ABMSchedulerEngine:
                             away_alley_0.append(self.play[(t2, t, w, s, 0)])
                             away_alley_1.append(self.play[(t2, t, w, s, 1)])
             
-            # Overall Home vs Away must be equal (or difference of 1)
             total_home = sum(home_alley_0) + sum(home_alley_1)
             total_away = sum(away_alley_0) + sum(away_alley_1)
             self.model.Add(total_home - total_away <= 1)
             self.model.Add(total_away - total_home <= 1)
             
-            # Overall Alley 1 vs Alley 2 must be equal (or difference of 1)
             total_alley_0 = sum(home_alley_0) + sum(away_alley_0)
             total_alley_1 = sum(home_alley_1) + sum(away_alley_1)
             self.model.Add(total_alley_0 - total_alley_1 <= 1)
             self.model.Add(total_alley_1 - total_alley_0 <= 1)
 
-            # Granular checks: Ensure home and away fixtures are distributed across both alleys
-            # We use <= 2 here to give the solver a tiny bit of breathing room so it doesn't crash on impossible combinations
             self.model.Add(sum(home_alley_0) - sum(home_alley_1) <= 2)
             self.model.Add(sum(home_alley_1) - sum(home_alley_0) <= 2)
             self.model.Add(sum(away_alley_0) - sum(away_alley_1) <= 2)
@@ -195,7 +189,6 @@ class ABMSchedulerEngine:
     def solve(self):
         self.add_constraints()
         solver = cp_model.CpSolver()
-        # Increased time limit to 3 minutes as the equal home/away logic significantly increases mathematical complexity
         solver.parameters.max_time_in_seconds = 180.0 
         status = solver.Solve(self.model)
         
@@ -280,7 +273,9 @@ with tab1:
 
 with tab2:
     st.header("Venue & Specific Date Blockers")
+    st.write("Add new exceptions via the inputs, or directly edit/delete existing rows in the tables below.")
     col_a, col_b = st.columns(2)
+    
     with col_a:
         st.subheader("Add Venue/Alley Block")
         v_date = st.date_input("Date Closed", key="v_date")
@@ -288,9 +283,22 @@ with tab2:
         if st.button("Add Venue Block"):
             st.session_state.venue_blocks.append({"Date": v_date, "Scope": v_scope})
             st.rerun()
+            
         if st.session_state.venue_blocks:
-            st.dataframe(pd.DataFrame(st.session_state.venue_blocks))
-            if st.button("Clear Venue Blocks"):
+            v_df = pd.DataFrame(st.session_state.venue_blocks)
+            edited_v_df = st.data_editor(
+                v_df, 
+                num_rows="dynamic", 
+                column_config={"Date": st.column_config.DateColumn("Date")},
+                key="v_editor",
+                use_container_width=True
+            )
+            # Safely clean up date formats and save back
+            if not edited_v_df.empty:
+                edited_v_df['Date'] = pd.to_datetime(edited_v_df['Date']).dt.date
+            st.session_state.venue_blocks = edited_v_df.to_dict('records')
+            
+            if st.button("Clear All Venue Blocks"):
                 st.session_state.venue_blocks = []
                 st.rerun()
 
@@ -302,9 +310,21 @@ with tab2:
             if t_team:
                 st.session_state.team_blocks.append({"Date": t_date, "Team": t_team})
                 st.rerun()
+                
         if st.session_state.team_blocks:
-            st.dataframe(pd.DataFrame(st.session_state.team_blocks))
-            if st.button("Clear Team Blocks"):
+            t_df = pd.DataFrame(st.session_state.team_blocks)
+            edited_t_df = st.data_editor(
+                t_df, 
+                num_rows="dynamic", 
+                column_config={"Date": st.column_config.DateColumn("Date")},
+                key="t_editor",
+                use_container_width=True
+            )
+            if not edited_t_df.empty:
+                edited_t_df['Date'] = pd.to_datetime(edited_t_df['Date']).dt.date
+            st.session_state.team_blocks = edited_t_df.to_dict('records')
+            
+            if st.button("Clear All Team Blocks"):
                 st.session_state.team_blocks = []
                 st.rerun()
 
