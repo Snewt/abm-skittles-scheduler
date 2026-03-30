@@ -99,20 +99,30 @@ if check_password():
             self.num_slots = 8 
             self.num_alleys = num_alleys
             
+            # --- THE F1 ENGINE UPGRADE: Halving the variables ---
+            self.pairs = [
+                (t1, t2) for t1 in range(self.num_teams) 
+                for t2 in range(t1 + 1, self.num_teams) 
+                if self.team_data.iloc[t1]['Division'] == self.team_data.iloc[t2]['Division']
+            ]
+            
+        def _build(self):
             self.model = cp_model.CpModel()
-            self.play = {}
-            self.create_variables()
+            self.match = {}
+            self.home = {}
+            self._create_variables()
 
-        def create_variables(self):
-            for t1 in range(self.num_teams):
-                for t2 in range(self.num_teams):
-                    if t1 != t2 and self.team_data.iloc[t1]['Division'] == self.team_data.iloc[t2]['Division']:
-                        for w in range(self.num_weeks):
-                            for s in range(self.num_slots):
-                                for a in range(self.num_alleys):
-                                    self.play[(t1, t2, w, s, a)] = self.model.NewBoolVar(
-                                        f'match_t{t1}_t{t2}_w{w}_s{s}_a{a}'
-                                    )
+        def _create_variables(self):
+            for (t1, t2) in self.pairs:
+                for w in range(self.num_weeks):
+                    for s in range(self.num_slots):
+                        for a in range(self.num_alleys):
+                            key = (t1, t2, w, s, a)
+                            self.match[key] = self.model.NewBoolVar(f'm_{t1}_{t2}_{w}_{s}_{a}')
+                            self.home[key] = self.model.NewBoolVar(f'h_{t1}_{t2}_{w}_{s}_{a}')
+                            
+                            # --- GHOST HOME FIX ---
+                            self.model.Add(self.home[key] <= self.match[key])
 
         def get_overridden_slots(self, t1_name, t2_name):
             allowed = []
@@ -133,110 +143,71 @@ if check_password():
                             allowed.append(s9)
             return allowed
 
-        def add_constraints(self):
-            for t1 in range(self.num_teams):
-                for t2 in range(t1 + 1, self.num_teams):
-                    if self.team_data.iloc[t1]['Division'] == self.team_data.iloc[t2]['Division']:
-                        matches_t1_home = [self.play[(t1, t2, w, s, a)] for w in range(self.num_weeks) for s in range(self.num_slots) for a in range(self.num_alleys)]
-                        matches_t2_home = [self.play[(t2, t1, w, s, a)] for w in range(self.num_weeks) for s in range(self.num_slots) for a in range(self.num_alleys)]
-                        
-                        t1_sum = cp_model.LinearExpr.Sum(matches_t1_home)
-                        t2_sum = cp_model.LinearExpr.Sum(matches_t2_home)
-                        
-                        self.model.Add(t1_sum + t2_sum == self.matches_per_pair)
-                        
-                        if self.matches_per_pair % 2 == 0:
-                            self.model.Add(t1_sum == self.matches_per_pair // 2)
-                            self.model.Add(t2_sum == self.matches_per_pair // 2)
-                        else:
-                            self.model.Add(t1_sum - t2_sum <= 1)
-                            self.model.Add(t2_sum - t1_sum <= 1)
+        def add_constraints(self, relax_time=False, relax_clumping=False):
+            # 1. Matches per pair & Exact Home/Away split
+            for (t1, t2) in self.pairs:
+                pair_matches = [self.match[(t1, t2, w, s, a)] for w in range(self.num_weeks) for s in range(self.num_slots) for a in range(self.num_alleys)]
+                pair_home = [self.home[(t1, t2, w, s, a)] for w in range(self.num_weeks) for s in range(self.num_slots) for a in range(self.num_alleys)]
+                
+                self.model.Add(cp_model.LinearExpr.Sum(pair_matches) == self.matches_per_pair)
+                
+                home_sum = cp_model.LinearExpr.Sum(pair_home)
+                min_home = self.matches_per_pair // 2
+                max_home = (self.matches_per_pair + 1) // 2
+                self.model.Add(home_sum >= min_home)
+                self.model.Add(home_sum <= max_home)
             
+            # 2. One match per week per team
             for t in range(self.num_teams):
                 for w in range(self.num_weeks):
-                    weekly_matches = []
-                    for t2 in range(self.num_teams):
-                        if t != t2 and self.team_data.iloc[t]['Division'] == self.team_data.iloc[t2]['Division']:
+                    week_vars = []
+                    for (t1, t2) in self.pairs:
+                        if t == t1 or t == t2:
                             for s in range(self.num_slots):
                                 for a in range(self.num_alleys):
-                                    weekly_matches.append(self.play[(t, t2, w, s, a)])
-                                    weekly_matches.append(self.play[(t2, t, w, s, a)])
-                    self.model.Add(cp_model.LinearExpr.Sum(weekly_matches) <= 1)
+                                    week_vars.append(self.match[(t1, t2, w, s, a)])
+                    if week_vars:
+                        self.model.Add(cp_model.LinearExpr.Sum(week_vars) <= 1)
 
+            # 3. Slot capacity (no double booking alleys)
             for w in range(self.num_weeks):
                 for s in range(self.num_slots):
                     for a in range(self.num_alleys):
-                        slot_matches = []
-                        for t1 in range(self.num_teams):
-                            for t2 in range(self.num_teams):
-                                if t1 != t2 and (t1, t2, w, s, a) in self.play:
-                                    slot_matches.append(self.play[(t1, t2, w, s, a)])
-                        self.model.Add(cp_model.LinearExpr.Sum(slot_matches) <= 1)
+                        slot_vars = [self.match[(t1, t2, w, s, a)] for (t1, t2) in self.pairs]
+                        if slot_vars:
+                            self.model.Add(cp_model.LinearExpr.Sum(slot_vars) <= 1)
 
-            for t in range(self.num_teams):
-                home_alley_0 = []
-                home_alley_1 = []
-                away_alley_0 = []
-                away_alley_1 = []
-                
-                for t2 in range(self.num_teams):
-                    if t != t2 and self.team_data.iloc[t]['Division'] == self.team_data.iloc[t2]['Division']:
-                        for w in range(self.num_weeks):
-                            for s in range(self.num_slots):
-                                if self.num_alleys > 0:
-                                    home_alley_0.append(self.play[(t, t2, w, s, 0)])
-                                    away_alley_0.append(self.play[(t2, t, w, s, 0)])
-                                if self.num_alleys == 2:
-                                    home_alley_1.append(self.play[(t, t2, w, s, 1)])
-                                    away_alley_1.append(self.play[(t2, t, w, s, 1)])
-                
-                total_home = cp_model.LinearExpr.Sum(home_alley_0 + home_alley_1)
-                total_away = cp_model.LinearExpr.Sum(away_alley_0 + away_alley_1)
-                self.model.Add(total_home - total_away <= 1)
-                self.model.Add(total_away - total_home <= 1)
-                
-                if self.num_alleys == 2:
-                    total_alley_0 = cp_model.LinearExpr.Sum(home_alley_0 + away_alley_0)
-                    total_alley_1 = cp_model.LinearExpr.Sum(home_alley_1 + away_alley_1)
-                    self.model.Add(total_alley_0 - total_alley_1 <= 1)
-                    self.model.Add(total_alley_1 - total_alley_0 <= 1)
-
-                    self.model.Add(cp_model.LinearExpr.Sum(home_alley_0) - cp_model.LinearExpr.Sum(home_alley_1) <= 2)
-                    self.model.Add(cp_model.LinearExpr.Sum(home_alley_1) - cp_model.LinearExpr.Sum(home_alley_0) <= 2)
-                    self.model.Add(cp_model.LinearExpr.Sum(away_alley_0) - cp_model.LinearExpr.Sum(away_alley_1) <= 2)
-                    self.model.Add(cp_model.LinearExpr.Sum(away_alley_1) - cp_model.LinearExpr.Sum(away_alley_0) <= 2)
-
+            # 4. Handle Specific Unavailable Days & Exceptions (SAFE GET METHOD)
             for t in range(self.num_teams):
                 t_name = self.team_data.iloc[t]['Team Name']
                 row = self.team_data.iloc[t]
                 days_config = {
-                    'Monday': (0, 1, row['Monday']),
-                    'Tuesday': (2, 3, row['Tuesday']),
-                    'Wednesday': (4, 5, row['Wednesday']),
-                    'Thursday': (6, 7, row['Thursday'])
+                    'Monday': (0, 1, row.get('Monday', 'Any')),
+                    'Tuesday': (2, 3, row.get('Tuesday', 'Any')),
+                    'Wednesday': (4, 5, row.get('Wednesday', 'Any')),
+                    'Thursday': (6, 7, row.get('Thursday', 'Any'))
                 }
-                for day, (slot_8, slot_9, config) in days_config.items():
-                    slots_to_block = []
-                    if config == "Unavailable":
-                        slots_to_block.extend([slot_8, slot_9])
-                    elif config == "8:00 pm only":
-                        slots_to_block.append(slot_9)
-                    elif config == "9:00 pm only":
-                        slots_to_block.append(slot_8)
-                    
-                    if slots_to_block:
-                        for t2 in range(self.num_teams):
-                            if t != t2 and (t, t2, 0, 0, 0) in self.play:
-                                t2_name = self.team_data.iloc[t2]['Team Name']
-                                overridden = self.get_overridden_slots(t_name, t2_name)
-                                
-                                for w in range(self.num_weeks):
-                                    for s in slots_to_block:
-                                        if s not in overridden:
-                                            for a in range(self.num_alleys):
-                                                self.model.Add(self.play[(t, t2, w, s, a)] == 0)
-                                                self.model.Add(self.play[(t2, t, w, s, a)] == 0)
+                slots_to_block = []
+                for day, (s8, s9, config) in days_config.items():
+                    if config == "Unavailable": slots_to_block.extend([s8, s9])
+                    elif config == "8:00 pm only": slots_to_block.append(s9)
+                    elif config == "9:00 pm only": slots_to_block.append(s8)
+                
+                if slots_to_block:
+                    for (t1, t2) in self.pairs:
+                        if t == t1 or t == t2:
+                            t2_name = self.team_data.iloc[t2 if t == t1 else t1]['Team Name']
+                            overridden = self.get_overridden_slots(t_name, t2_name)
+                            
+                            for w in range(self.num_weeks):
+                                for s in slots_to_block:
+                                    if s not in overridden:
+                                        for a in range(self.num_alleys):
+                                            var = self.match.get((t1, t2, w, s, a))
+                                            if var is not None:
+                                                self.model.Add(var == 0)
 
+            # 5. Handle Venue & Team Specific Dates (SAFE GET METHOD)
             for w in range(self.num_weeks):
                 week_start = self.play_weeks[w]
                 for s in range(self.num_slots):
@@ -247,121 +218,160 @@ if check_password():
                             alleys_to_block = [0, 1] if block['Scope'] == "Whole Club" else ([0] if block['Scope'] == "Alley 1" else [1])
                             for a in alleys_to_block:
                                 if a < self.num_alleys:
-                                    for t1 in range(self.num_teams):
-                                        for t2 in range(self.num_teams):
-                                            if (t1, t2, w, s, a) in self.play:
-                                                self.model.Add(self.play[(t1, t2, w, s, a)] == 0)
+                                    for (t1, t2) in self.pairs:
+                                        var = self.match.get((t1, t2, w, s, a))
+                                        if var is not None:
+                                            self.model.Add(var == 0)
 
                     for block in self.team_blocks:
                         if block['Date'] == current_date:
                             target_team = block['Team']
-                            for t in range(self.num_teams):
-                                if self.team_data.iloc[t]['Team Name'] == target_team:
-                                    for t2 in range(self.num_teams):
-                                        for a in range(self.num_alleys):
-                                            if (t, t2, w, s, a) in self.play:
-                                                self.model.Add(self.play[(t, t2, w, s, a)] == 0)
-                                                self.model.Add(self.play[(t2, t, w, s, a)] == 0)
-
-            penalties = []
-            
-            team_day_vars = {}
-            for t in range(self.num_teams):
-                for w in range(self.num_weeks):
-                    for d in range(4):
-                        matches_this_day = []
-                        for s in [d*2, d*2+1]: 
-                            for t2 in range(self.num_teams):
-                                if t != t2 and (t, t2, w, s, 0) in self.play:
+                            for (t1, t2) in self.pairs:
+                                name1 = self.team_data.iloc[t1]['Team Name']
+                                name2 = self.team_data.iloc[t2]['Team Name']
+                                if target_team in (name1, name2):
                                     for a in range(self.num_alleys):
-                                        matches_this_day.append(self.play[(t, t2, w, s, a)])
-                                        matches_this_day.append(self.play[(t2, t, w, s, a)])
-                        team_day_vars[(t, w, d)] = cp_model.LinearExpr.Sum(matches_this_day)
+                                        var = self.match.get((t1, t2, w, s, a))
+                                        if var is not None:
+                                            self.model.Add(var == 0)
 
-            # --- Anti-Clumping (Days) ---
+            # 6. Global Balancing & Soft Penalties
+            penalties = []
+            max_matches = self.num_weeks
+            
             for t in range(self.num_teams):
-                for w in range(self.num_weeks - 2):
-                    for d in range(4):
-                        window_sum = team_day_vars[(t, w, d)] + team_day_vars[(t, w+1, d)] + team_day_vars[(t, w+2, d)]
-                        
-                        is_two_clump = self.model.NewBoolVar(f'two_clump_t{t}_w{w}_d{d}')
-                        is_three_clump = self.model.NewBoolVar(f'three_clump_t{t}_w{w}_d{d}')
-                        
-                        self.model.Add(window_sum >= 2).OnlyEnforceIf(is_two_clump)
-                        self.model.Add(window_sum < 2).OnlyEnforceIf(is_two_clump.Not())
-                        self.model.Add(window_sum >= 3).OnlyEnforceIf(is_three_clump)
-                        self.model.Add(window_sum < 3).OnlyEnforceIf(is_three_clump.Not())
-                        
-                        penalties.append(is_two_clump)                              
-                        penalties.extend([is_three_clump] * 100)                    
-
-            # --- Time Parity (8pm vs 9pm) ---
-            for t, row in self.team_data.iterrows():
-                pref = row['Prefers Time']
+                home_vars, away_vars = [], []
+                alley0_vars, alley1_vars = [], []
+                early_vars, late_vars = [], []
+                team_day_vars = {(w, d): [] for w in range(self.num_weeks) for d in range(4)}
                 
-                matches_8pm = []
-                matches_9pm = []
-                for t2 in range(self.num_teams):
-                    if t != t2 and self.team_data.iloc[t]['Division'] == self.team_data.iloc[t2]['Division']:
+                for (t1, t2) in self.pairs:
+                    if t in (t1, t2):
                         for w in range(self.num_weeks):
                             for s in range(self.num_slots):
                                 for a in range(self.num_alleys):
-                                    if (t, t2, w, s, a) in self.play:
-                                        if s % 2 == 0:
-                                            matches_8pm.extend([self.play[(t, t2, w, s, a)], self.play[(t2, t, w, s, a)]])
-                                        else:
-                                            matches_9pm.extend([self.play[(t, t2, w, s, a)], self.play[(t2, t, w, s, a)]])
+                                    m = self.match[(t1, t2, w, s, a)]
+                                    h = self.home[(t1, t2, w, s, a)]
+                                    
+                                    if t == t1:
+                                        home_vars.append(h)
+                                        away_vars.append(m - h)
+                                    else:
+                                        home_vars.append(m - h)
+                                        away_vars.append(h)
+                                        
+                                    if a == 0: alley0_vars.append(m)
+                                    elif a == 1: alley1_vars.append(m)
+                                    
+                                    if s % 2 == 0: early_vars.append(m)
+                                    else: late_vars.append(m)
+                                    
+                                    d = s // 2
+                                    team_day_vars[(w, d)].append(m)
 
+                # Overall Home/Away Balance (Global)
+                ha_diff = self.model.NewIntVar(-max_matches, max_matches, f"ha_diff_{t}")
+                ha_abs = self.model.NewIntVar(0, max_matches, f"ha_abs_{t}")
+                self.model.Add(ha_diff == cp_model.LinearExpr.Sum(home_vars) - cp_model.LinearExpr.Sum(away_vars))
+                self.model.AddAbsEquality(ha_abs, ha_diff)
+                penalties.append(ha_abs * 2)
+
+                # Alley Parity
+                if self.num_alleys == 2:
+                    al_diff = self.model.NewIntVar(-max_matches, max_matches, f"al_diff_{t}")
+                    al_abs = self.model.NewIntVar(0, max_matches, f"al_abs_{t}")
+                    self.model.Add(al_diff == cp_model.LinearExpr.Sum(alley0_vars) - cp_model.LinearExpr.Sum(alley1_vars))
+                    self.model.AddAbsEquality(al_abs, al_diff)
+                    penalties.append(al_abs)
+
+                # Time Parity
+                pref = self.team_data.iloc[t].get('Prefers Time', 'No Preference')
+                early_sum = cp_model.LinearExpr.Sum(early_vars)
+                late_sum = cp_model.LinearExpr.Sum(late_vars)
+                
                 if pref == "8:00 pm":
-                    for var in matches_9pm:
-                        penalties.extend([var, var])
+                    if not relax_time:
+                        penalties.append(late_sum * 10)
                 elif pref == "9:00 pm":
-                    for var in matches_8pm:
-                        penalties.extend([var, var])
+                    if not relax_time:
+                        penalties.append(early_sum * 10)
                 else:
-                    max_matches = self.num_teams * self.matches_per_pair
-                    time_diff = self.model.NewIntVar(-max_matches, max_matches, f'time_diff_t{t}')
-                    abs_time_diff = self.model.NewIntVar(0, max_matches, f'abs_time_diff_t{t}')
-                    
-                    self.model.Add(time_diff == cp_model.LinearExpr.Sum(matches_8pm) - cp_model.LinearExpr.Sum(matches_9pm))
-                    self.model.AddAbsEquality(abs_time_diff, time_diff)
-                    
-                    penalties.append(abs_time_diff)
-            
+                    td_diff = self.model.NewIntVar(-max_matches, max_matches, f"td_diff_{t}")
+                    td_abs = self.model.NewIntVar(0, max_matches, f"td_abs_{t}")
+                    self.model.Add(td_diff == early_sum - late_sum)
+                    self.model.AddAbsEquality(td_abs, td_diff)
+                    penalties.append(td_abs)
+
+                # Anti-Clumping
+                if not relax_clumping:
+                    for w in range(self.num_weeks - 2):
+                        for d in range(4):
+                            window_vars = team_day_vars[(w, d)] + team_day_vars[(w+1, d)] + team_day_vars[(w+2, d)]
+                            window_sum = cp_model.LinearExpr.Sum(window_vars)
+                            
+                            is_two_clump = self.model.NewBoolVar(f"two_clump_{t}_{w}_{d}")
+                            is_three_clump = self.model.NewBoolVar(f"three_clump_{t}_{w}_{d}")
+                            
+                            self.model.Add(window_sum >= 2).OnlyEnforceIf(is_two_clump)
+                            self.model.Add(window_sum < 2).OnlyEnforceIf(is_two_clump.Not())
+                            self.model.Add(window_sum >= 3).OnlyEnforceIf(is_three_clump)
+                            self.model.Add(window_sum < 3).OnlyEnforceIf(is_three_clump.Not())
+                            
+                            penalties.append(is_two_clump * 1)
+                            penalties.append(is_three_clump * 100) # Memory safe!
+
             if penalties:
                 self.model.Minimize(cp_model.LinearExpr.Sum(penalties))
 
-        def solve(self):
-            self.add_constraints()
-            solver = cp_model.CpSolver()
-            solver.parameters.max_time_in_seconds = 240.0 
-            status = solver.Solve(self.model)
+        # --- THE CASCADING SOLVER: Guaranteed answers ---
+        def solve(self, time_limit):
+            def run_attempt(msg, r_time, r_clump, t_limit):
+                self._build()
+                self.add_constraints(relax_time=r_time, relax_clumping=r_clump)
+                solver = cp_model.CpSolver()
+                solver.parameters.max_time_in_seconds = t_limit
+                solver.parameters.num_search_workers = 8 
+                status = solver.Solve(self.model)
+                if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                    return self._extract(solver), status, msg
+                return None, status, msg
+
+            # Attempt 1: Strict Mode
+            res, status, msg = run_attempt("Optimal Solution Found!", False, False, time_limit)
+            if res: return res, status, msg
             
+            if status == cp_model.INFEASIBLE:
+                # Attempt 2: Relax Time Preferences slightly
+                res, status, msg = run_attempt("Solution found by relaxing strict Time Preferences", True, False, time_limit * 0.5)
+                if res: return res, status, msg
+                
+                # Attempt 3: Relax Time & Clumping Rules
+                res, status, msg = run_attempt("Solution found by relaxing Time & Clumping Rules (Schedule was very tight)", True, True, time_limit * 0.5)
+                if res: return res, status, msg
+            
+            return None, status, "Failed"
+
+        def _extract(self, solver):
             results = []
-            if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
-                for w in range(self.num_weeks):
-                    for s in range(self.num_slots):
-                        match_date = self.play_weeks[w] + datetime.timedelta(days=DAY_OFFSETS[s])
-                        day_name = match_date.strftime("%a")
-                        time_str = "8:00 pm" if s % 2 == 0 else "9:00 pm"
-                        
-                        for a in range(self.num_alleys):
-                            for t1 in range(self.num_teams):
-                                for t2 in range(self.num_teams):
-                                    if (t1, t2, w, s, a) in self.play and solver.Value(self.play[(t1, t2, w, s, a)]) == 1:
-                                        results.append({
-                                            "SortDate": match_date,
-                                            "Date": match_date.strftime("%d %b %Y"),
-                                            "Day": day_name,
-                                            "Time": time_str,
-                                            "Home Team Name": self.team_data.iloc[t1]['Team Name'],
-                                            "Away Team Name": self.team_data.iloc[t2]['Team Name'],
-                                            "Alley": f"Alley {a + 1}",
-                                            "Division": self.team_data.iloc[t1]['Division']
-                                        })
-                return results
-            else:
-                return None
+            for (t1, t2, w, s, a), var in self.match.items():
+                if solver.Value(var):
+                    date = self.play_weeks[w] + datetime.timedelta(days=DAY_OFFSETS[s])
+                    is_home = solver.Value(self.home[(t1, t2, w, s, a)]) == 1
+                    
+                    home_name = self.team_data.iloc[t1]['Team Name'] if is_home else self.team_data.iloc[t2]['Team Name']
+                    away_name = self.team_data.iloc[t2]['Team Name'] if is_home else self.team_data.iloc[t1]['Team Name']
+                    
+                    results.append({
+                        "SortDate": date,
+                        "Date": date.strftime("%d %b %Y"),
+                        "Day": date.strftime("%a"),
+                        "Time": "8:00 pm" if s % 2 == 0 else "9:00 pm",
+                        "Home Team Name": home_name,
+                        "Away Team Name": away_name,
+                        "Alley": f"Alley {a+1}",
+                        "Division": self.team_data.iloc[t1]['Division']
+                    })
+            return results
 
     def calculate_playing_weeks(start_date, end_date, xmas_start, xmas_end, easter_start, easter_end):
         weeks = []
@@ -428,6 +438,9 @@ if check_password():
         
         available_weeks = calculate_playing_weeks(season_start, season_end, xmas_start, xmas_end, easter_start, easter_end)
         st.info(f"Playable weeks generated: **{len(available_weeks)}**")
+        
+        st.markdown("---")
+        ui_timeout = st.slider("Solver Time Limit (Seconds)", min_value=30, max_value=300, value=120, help="Higher numbers give the solver more time to find optimal schedules for complex configurations.")
 
     with tab2:
         st.header("Venue & Specific Date Blockers")
@@ -437,17 +450,14 @@ if check_password():
             st.subheader("Add Venue/Alley Block")
             v_date = st.date_input("Date(s) Closed (Select one date, or a start and end date)", value=[], key="v_date")
             v_scope = st.selectbox("What is closed?", ["Whole Club", "Alley 1", "Alley 2"])
-            if st.button("Add Venue Block"):
+            if st.button("Add Venue Block", key="add_venue"):
                 dates = []
-                if isinstance(v_date, (list, tuple)):
-                    dates = list(v_date)
-                elif v_date:
-                    dates = [v_date]
+                if isinstance(v_date, (list, tuple)): dates = list(v_date)
+                elif v_date: dates = [v_date]
 
                 if len(dates) > 0:
                     start_d = dates[0]
                     end_d = dates[1] if len(dates) > 1 else dates[0]
-                    
                     current = start_d
                     while current <= end_d:
                         if not any(b['Date'] == current and b['Scope'] == v_scope for b in st.session_state.venue_blocks):
@@ -460,7 +470,7 @@ if check_password():
             if st.session_state.venue_blocks:
                 v_df = pd.DataFrame(st.session_state.venue_blocks)
                 edited_v_df = st.data_editor(v_df, num_rows="dynamic", column_config={"Date": st.column_config.DateColumn("Date")}, key="v_editor")
-                if not edited_v_df.empty:
+                if not edited_v_df.empty and 'Date' in edited_v_df.columns:
                     edited_v_df['Date'] = pd.to_datetime(edited_v_df['Date']).dt.date
                 st.session_state.venue_blocks = edited_v_df.to_dict('records')
 
@@ -468,17 +478,14 @@ if check_password():
             st.subheader("Add Specific Team Block")
             t_date = st.date_input("Date(s) Unavailable (Select one date, or a start and end date)", value=[], key="t_date")
             t_team = st.text_input("Exact Team Name")
-            if st.button("Add Team Block"):
+            if st.button("Add Team Block", key="add_team"):
                 dates = []
-                if isinstance(t_date, (list, tuple)):
-                    dates = list(t_date)
-                elif t_date:
-                    dates = [t_date]
+                if isinstance(t_date, (list, tuple)): dates = list(t_date)
+                elif t_date: dates = [t_date]
 
                 if t_team and len(dates) > 0:
                     start_d = dates[0]
                     end_d = dates[1] if len(dates) > 1 else dates[0]
-                    
                     current = start_d
                     while current <= end_d:
                         if not any(b['Date'] == current and b['Team'] == t_team for b in st.session_state.team_blocks):
@@ -493,7 +500,7 @@ if check_password():
             if st.session_state.team_blocks:
                 t_df = pd.DataFrame(st.session_state.team_blocks)
                 edited_t_df = st.data_editor(t_df, num_rows="dynamic", column_config={"Date": st.column_config.DateColumn("Date")}, key="t_editor")
-                if not edited_t_df.empty:
+                if not edited_t_df.empty and 'Date' in edited_t_df.columns:
                     edited_t_df['Date'] = pd.to_datetime(edited_t_df['Date']).dt.date
                 st.session_state.team_blocks = edited_t_df.to_dict('records')
 
@@ -509,12 +516,8 @@ if check_password():
                 
                 def extract_division(df, div_name):
                     div_df = df[df['Division'] == div_name].copy()
-                    if div_df.empty:
-                        return pd.DataFrame()
-                    
-                    # --- FIX 1: Reset index BEFORE creating the new dataframe ---
+                    if div_df.empty: return pd.DataFrame()
                     div_df = div_df.reset_index(drop=True)
-                    
                     res = pd.DataFrame()
                     res['Playing?'] = [True] * len(div_df)
                     res['Team Name'] = div_df['Team Name']
@@ -537,21 +540,23 @@ if check_password():
                         for rd in raw_dates:
                             rd = rd.strip()
                             if not rd: continue
-                            try:
-                                p_date = datetime.datetime.strptime(rd, "%d/%m/%y").date()
-                                parsed_blocks.append({"Date": p_date, "Team": t_name})
+                            try: p_date = datetime.datetime.strptime(rd, "%d/%m/%y").date()
                             except ValueError:
-                                try:
-                                    p_date = datetime.datetime.strptime(rd, "%d/%m/%Y").date()
-                                    parsed_blocks.append({"Date": p_date, "Team": t_name})
+                                try: p_date = datetime.datetime.strptime(rd, "%d/%m/%Y").date()
                                 except ValueError:
-                                    st.warning(f"Could not automatically read date '{rd}' for team '{t_name}'. Please add it manually in Tab 2.")
-                st.session_state.team_blocks.extend(parsed_blocks)
+                                    st.warning(f"Could not read date '{rd}' for '{t_name}'. Add manually in Tab 2.")
+                                    continue
+                            parsed_blocks.append({"Date": p_date, "Team": t_name})
+                            
+                # SAFE DEDUPLICATION FIX
+                existing = {(b['Date'], b['Team']) for b in st.session_state.team_blocks}
+                for pb in parsed_blocks:
+                    if (pb['Date'], pb['Team']) not in existing:
+                        st.session_state.team_blocks.append(pb)
+                        existing.add((pb['Date'], pb['Team']))
                 
-                # --- FIX 2: Increment the sync key to dynamically rename tables and bypass the cache ---
                 st.session_state.sync_key += 1
-                
-                st.success("Data successfully synced!")
+                st.success("Data successfully synced! (Please refresh the page to update the tables).")
             except Exception as e:
                 st.error(f"Failed to fetch data. Error: {e}")
 
@@ -566,28 +571,37 @@ if check_password():
         }
 
         st.subheader("Division 1")
-        # Apply the dynamic key here
+        if 'Playing?' not in st.session_state.div1_data.columns:
+            st.session_state.div1_data.insert(0, 'Playing?', True)
+            
         div1_edited = st.data_editor(st.session_state.div1_data, column_config=col_config, num_rows="dynamic", key=f"div1_ui_{st.session_state.sync_key}")
-        
+        if 'Playing?' not in div1_edited.columns: div1_edited.insert(0, 'Playing?', True)
+            
         if ui_num_divisions == 2:
             st.subheader("Division 2")
-            # And apply the dynamic key here
+            if 'Playing?' not in st.session_state.div2_data.columns:
+                st.session_state.div2_data.insert(0, 'Playing?', True)
+                
             div2_edited = st.data_editor(st.session_state.div2_data, column_config=col_config, num_rows="dynamic", key=f"div2_ui_{st.session_state.sync_key}")
+            if 'Playing?' not in div2_edited.columns: div2_edited.insert(0, 'Playing?', True)
         else:
             div2_edited = st.session_state.div2_data
+            if 'Playing?' not in div2_edited.columns:
+                temp_df = div2_edited.copy()
+                temp_df.insert(0, 'Playing?', True)
+                div2_edited = temp_df
+                st.session_state.div2_data = temp_df
 
     with tab4:
         st.header("Clash Checker & Match Exceptions")
         
         d1 = div1_edited.copy()
-        if 'Playing?' in d1.columns:
-            d1 = d1[d1['Playing?'] == True]
+        if 'Playing?' in d1.columns: d1 = d1[d1['Playing?'] == True]
         d1['Division'] = 'Division 1'
         
         if ui_num_divisions == 2:
             d2 = div2_edited.copy()
-            if 'Playing?' in d2.columns:
-                d2 = d2[d2['Playing?'] == True]
+            if 'Playing?' in d2.columns: d2 = d2[d2['Playing?'] == True]
             d2['Division'] = 'Division 2'
             full_teams = pd.concat([d1, d2], ignore_index=True)
         else:
@@ -612,7 +626,7 @@ if check_password():
                 exc_t2 = st.selectbox("Team 2", full_teams['Team Name'].tolist())
                 exc_time = st.selectbox("Override Time", ["Both", "8:00 pm", "9:00 pm"])
                 
-            if st.button("Add Exception"):
+            if st.button("Add Exception", key="add_exc"):
                 if exc_t1 != exc_t2:
                     st.session_state.match_exceptions.append({
                         "Team 1": exc_t1, "Team 2": exc_t2,
@@ -631,7 +645,7 @@ if check_password():
         st.header("Generate Schedule")
         
         if st.button("Run Optimisation Engine", type="primary"):
-            with st.spinner("Calculating... Note: This requires complex maths and may take up to 4 minutes."):
+            with st.spinner("Calculating... Note: The engine will now automatically relax rules if it hits a mathematical brick wall."):
                 scheduler = ABMSchedulerEngine(
                     div1_edited, div2_edited, available_weeks, 
                     matches_per_pair=matches_per_pair,
@@ -641,18 +655,30 @@ if check_password():
                     num_divisions=ui_num_divisions,
                     num_alleys=ui_num_alleys
                 )
-                schedule_data = scheduler.solve()
                 
-                if schedule_data:
-                    st.success("Success! Here is the finalised schedule.")
+                # Run the cascading solver with the UI timeout
+                schedule_data, status, msg = scheduler.solve(time_limit=ui_timeout)
+                
+                if status in (cp_model.OPTIMAL, cp_model.FEASIBLE) and schedule_data:
+                    st.success(f"Success! {msg}")
                     df = pd.DataFrame(schedule_data)
-                    
                     df = df.sort_values(by=["SortDate", "Time", "Alley"])
                     df = df[["Date", "Day", "Time", "Home Team Name", "Away Team Name", "Alley", "Division"]]
                     
                     st.dataframe(df)
                     
+                    # Added bonus: The Team View from the Candidate Audit!
+                    st.subheader("👥 Quick Team View")
+                    team = st.selectbox("Select a Team to filter:", sorted(pd.concat([df["Home Team Name"], df["Away Team Name"]]).unique()))
+                    tdf = df[(df["Home Team Name"] == team) | (df["Away Team Name"] == team)]
+                    st.dataframe(tdf)
+                    
                     csv = df.to_csv(index=False).encode('utf-8')
                     st.download_button(label="Download Schedule as CSV", data=csv, file_name="abm_skittles_schedule.csv", mime="text/csv")
                 else:
-                    st.error("The engine couldn't find a solution. There are too many restrictions locking the maths up.")
+                    if status == cp_model.INFEASIBLE:
+                        st.error("🚨 The engine couldn't find a solution (Infeasible). The constraints are mathematically impossible. Please check Tab 4 for Clashes, or try relaxing Venue/Team specific date blocks.")
+                    elif status == cp_model.MODEL_INVALID:
+                        st.error("🚨 The model is invalid. A background constraint was formed incorrectly.")
+                    else:
+                        st.error("🚨 The solver timed out before it could find an answer. Try increasing the Solver Time Limit slider in Tab 1.")
