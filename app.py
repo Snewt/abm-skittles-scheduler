@@ -420,7 +420,6 @@ if check_password():
         
         with col_a:
             st.subheader("Add Venue/Alley Block")
-            # Update to empty list for native range selection
             v_date = st.date_input("Date(s) Closed (Click twice for range)", value=[], key="v_date", format="DD/MM/YYYY")
             v_scope = st.selectbox("What is closed?", ["Whole Club", "Alley 1", "Alley 2"])
             if st.button("Add Venue Block"):
@@ -430,7 +429,6 @@ if check_password():
                     
                     current = start_d
                     while current <= end_d:
-                        # Prevent exact duplicates from piling up in the table
                         if not any(b['Date'] == current and b['Scope'] == v_scope for b in st.session_state.venue_blocks):
                             st.session_state.venue_blocks.append({"Date": current, "Scope": v_scope})
                         current += datetime.timedelta(days=1)
@@ -440,14 +438,13 @@ if check_password():
                 
             if st.session_state.venue_blocks:
                 v_df = pd.DataFrame(st.session_state.venue_blocks)
-                edited_v_df = st.data_editor(v_df, num_rows="dynamic", column_config={"Date": st.column_config.DateColumn("Date", format="DD/MM/YYYY")}, key="v_editor", use_container_width=True)
+                edited_v_df = st.data_editor(v_df, num_rows="dynamic", column_config={"Date": st.column_config.DateColumn("Date", format="DD/MM/YYYY")}, key="v_editor", width="stretch")
                 if not edited_v_df.empty:
                     edited_v_df['Date'] = pd.to_datetime(edited_v_df['Date']).dt.date
                 st.session_state.venue_blocks = edited_v_df.to_dict('records')
 
         with col_b:
             st.subheader("Add Specific Team Block")
-            # Update to empty list for native range selection
             t_date = st.date_input("Date(s) Unavailable (Click twice for range)", value=[], key="t_date", format="DD/MM/YYYY")
             t_team = st.text_input("Exact Team Name")
             if st.button("Add Team Block"):
@@ -468,7 +465,7 @@ if check_password():
                     
             if st.session_state.team_blocks:
                 t_df = pd.DataFrame(st.session_state.team_blocks)
-                edited_t_df = st.data_editor(t_df, num_rows="dynamic", column_config={"Date": st.column_config.DateColumn("Date", format="DD/MM/YYYY")}, key="t_editor", use_container_width=True)
+                edited_t_df = st.data_editor(t_df, num_rows="dynamic", column_config={"Date": st.column_config.DateColumn("Date", format="DD/MM/YYYY")}, key="t_editor", width="stretch")
                 if not edited_t_df.empty:
                     edited_t_df['Date'] = pd.to_datetime(edited_t_df['Date']).dt.date
                 st.session_state.team_blocks = edited_t_df.to_dict('records')
@@ -593,7 +590,7 @@ if check_password():
                     
             if st.session_state.match_exceptions:
                 exc_df = pd.DataFrame(st.session_state.match_exceptions)
-                edited_exc_df = st.data_editor(exc_df, num_rows="dynamic", key="exc_editor", use_container_width=True)
+                edited_exc_df = st.data_editor(exc_df, num_rows="dynamic", key="exc_editor", width="stretch")
                 st.session_state.match_exceptions = edited_exc_df.to_dict('records')
 
     with tab5:
@@ -619,7 +616,7 @@ if check_password():
                     df = df.sort_values(by=["SortDate", "Time", "Alley"])
                     df = df[["Date", "Day", "Time", "Home Team Name", "Away Team Name", "Alley", "Division"]]
                     
-                    st.dataframe(df, use_container_width=True)
+                    st.dataframe(df, width="stretch")
                     
                     csv = df.to_csv(index=False).encode('utf-8')
                     st.download_button(label="Download Schedule as CSV", data=csv, file_name="abm_skittles_schedule.csv", mime="text/csv")
