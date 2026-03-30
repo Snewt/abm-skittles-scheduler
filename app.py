@@ -438,7 +438,7 @@ if check_password():
                 
             if st.session_state.venue_blocks:
                 v_df = pd.DataFrame(st.session_state.venue_blocks)
-                edited_v_df = st.data_editor(v_df, num_rows="dynamic", column_config={"Date": st.column_config.DateColumn("Date", format="DD/MM/YYYY")}, key="v_editor", width="stretch")
+                edited_v_df = st.data_editor(v_df, num_rows="dynamic", column_config={"Date": st.column_config.DateColumn("Date", format="DD/MM/YYYY")}, key="v_editor")
                 if not edited_v_df.empty:
                     edited_v_df['Date'] = pd.to_datetime(edited_v_df['Date']).dt.date
                 st.session_state.venue_blocks = edited_v_df.to_dict('records')
@@ -465,7 +465,7 @@ if check_password():
                     
             if st.session_state.team_blocks:
                 t_df = pd.DataFrame(st.session_state.team_blocks)
-                edited_t_df = st.data_editor(t_df, num_rows="dynamic", column_config={"Date": st.column_config.DateColumn("Date", format="DD/MM/YYYY")}, key="t_editor", width="stretch")
+                edited_t_df = st.data_editor(t_df, num_rows="dynamic", column_config={"Date": st.column_config.DateColumn("Date", format="DD/MM/YYYY")}, key="t_editor")
                 if not edited_t_df.empty:
                     edited_t_df['Date'] = pd.to_datetime(edited_t_df['Date']).dt.date
                 st.session_state.team_blocks = edited_t_df.to_dict('records')
@@ -539,21 +539,29 @@ if check_password():
         }
 
         st.subheader("Division 1")
-        div1_edited = st.data_editor(st.session_state.div1_data, column_config=col_config, num_rows="dynamic", key="div1_ui", width="stretch")
         
-        # --- THE FAILSAFE: Check and patch missing columns caused by cache ---
-        if 'Playing?' not in div1_edited.columns:
-            div1_edited['Playing?'] = True
+        # --- THE SAFE FAILSAFE ---
+        if 'Playing?' not in st.session_state.div1_data.columns:
+            temp_df = st.session_state.div1_data.copy()
+            temp_df.insert(0, 'Playing?', True)
+            st.session_state.div1_data = temp_df
             
+        div1_edited = st.data_editor(st.session_state.div1_data, column_config=col_config, num_rows="dynamic", key="div1_ui")
+        
         if ui_num_divisions == 2:
             st.subheader("Division 2")
-            div2_edited = st.data_editor(st.session_state.div2_data, column_config=col_config, num_rows="dynamic", key="div2_ui", width="stretch")
-            if 'Playing?' not in div2_edited.columns:
-                div2_edited['Playing?'] = True
+            if 'Playing?' not in st.session_state.div2_data.columns:
+                temp_df = st.session_state.div2_data.copy()
+                temp_df.insert(0, 'Playing?', True)
+                st.session_state.div2_data = temp_df
+            div2_edited = st.data_editor(st.session_state.div2_data, column_config=col_config, num_rows="dynamic", key="div2_ui")
         else:
             div2_edited = st.session_state.div2_data
             if 'Playing?' not in div2_edited.columns:
-                div2_edited['Playing?'] = True
+                temp_df = div2_edited.copy()
+                temp_df.insert(0, 'Playing?', True)
+                div2_edited = temp_df
+                st.session_state.div2_data = temp_df
 
     with tab4:
         st.header("Clash Checker & Match Exceptions")
@@ -598,7 +606,7 @@ if check_password():
                     
             if st.session_state.match_exceptions:
                 exc_df = pd.DataFrame(st.session_state.match_exceptions)
-                edited_exc_df = st.data_editor(exc_df, num_rows="dynamic", key="exc_editor", width="stretch")
+                edited_exc_df = st.data_editor(exc_df, num_rows="dynamic", key="exc_editor")
                 st.session_state.match_exceptions = edited_exc_df.to_dict('records')
 
     with tab5:
@@ -624,7 +632,7 @@ if check_password():
                     df = df.sort_values(by=["SortDate", "Time", "Alley"])
                     df = df[["Date", "Day", "Time", "Home Team Name", "Away Team Name", "Alley", "Division"]]
                     
-                    st.dataframe(df, width="stretch")
+                    st.dataframe(df)
                     
                     csv = df.to_csv(index=False).encode('utf-8')
                     st.download_button(label="Download Schedule as CSV", data=csv, file_name="abm_skittles_schedule.csv", mime="text/csv")
