@@ -133,6 +133,7 @@ if check_password():
             return allowed
 
         def add_constraints(self):
+            # 1. Total Matches & Exact Home/Away Balance per Pair
             for t1 in range(self.num_teams):
                 for t2 in range(t1 + 1, self.num_teams):
                     if self.team_data.iloc[t1]['Division'] == self.team_data.iloc[t2]['Division']:
@@ -148,6 +149,7 @@ if check_password():
                             self.model.Add(matches_t1_home - matches_t2_home <= 1)
                             self.model.Add(matches_t2_home - matches_t1_home <= 1)
             
+            # 2. Match Frequency
             for t in range(self.num_teams):
                 for w in range(self.num_weeks):
                     weekly_matches = []
@@ -159,6 +161,7 @@ if check_password():
                                     weekly_matches.append(self.play[(t2, t, w, s, a)])
                     self.model.Add(sum(weekly_matches) <= 1)
 
+            # 3. Double Booking
             for w in range(self.num_weeks):
                 for s in range(self.num_slots):
                     for a in range(self.num_alleys):
@@ -169,6 +172,7 @@ if check_password():
                                     slot_matches.append(self.play[(t1, t2, w, s, a)])
                         self.model.Add(sum(slot_matches) <= 1)
 
+            # 4. Global Home/Away & Alley Balancing
             for t in range(self.num_teams):
                 home_alley_0 = []
                 home_alley_1 = []
@@ -202,6 +206,7 @@ if check_password():
                     self.model.Add(sum(away_alley_0) - sum(away_alley_1) <= 2)
                     self.model.Add(sum(away_alley_1) - sum(away_alley_0) <= 2)
 
+            # 5. Process Day/Time Preferences (With Exceptions Punched Through)
             for t in range(self.num_teams):
                 t_name = self.team_data.iloc[t]['Team Name']
                 row = self.team_data.iloc[t]
@@ -233,6 +238,7 @@ if check_password():
                                                 self.model.Add(self.play[(t, t2, w, s, a)] == 0)
                                                 self.model.Add(self.play[(t2, t, w, s, a)] == 0)
 
+            # 6. Process Specific Date Blocks
             for w in range(self.num_weeks):
                 week_start = self.play_weeks[w]
                 for s in range(self.num_slots):
@@ -259,6 +265,7 @@ if check_password():
                                                 self.model.Add(self.play[(t, t2, w, s, a)] == 0)
                                                 self.model.Add(self.play[(t2, t, w, s, a)] == 0)
 
+            # 7. Soft Preferences, Anti-Clumping & Time Parity
             penalties = []
             
             # --- Anti-Clumping (Days) ---
@@ -287,6 +294,7 @@ if check_password():
             for t, row in self.team_data.iterrows():
                 pref = row['Prefers Time']
                 
+                # Gather all 8:00 pm and 9:00 pm variables for this specific team
                 matches_8pm = []
                 matches_9pm = []
                 for t2 in range(self.num_teams):
@@ -301,12 +309,15 @@ if check_password():
                                             matches_9pm.extend([self.play[(t, t2, w, s, a)], self.play[(t2, t, w, s, a)]])
 
                 if pref == "8:00 pm":
+                    # Hard penalty for playing at 9:00 pm
                     for var in matches_9pm:
                         penalties.extend([var, var])
                 elif pref == "9:00 pm":
+                    # Hard penalty for playing at 8:00 pm
                     for var in matches_8pm:
                         penalties.extend([var, var])
                 else:
+                    # Soft Parity: Try to keep 8pm and 9pm games equal for "No Preference" teams
                     max_matches = self.num_teams * self.matches_per_pair
                     time_diff = self.model.NewIntVar(-max_matches, max_matches, f'time_diff_t{t}')
                     abs_time_diff = self.model.NewIntVar(0, max_matches, f'abs_time_diff_t{t}')
@@ -314,6 +325,7 @@ if check_password():
                     self.model.Add(time_diff == sum(matches_8pm) - sum(matches_9pm))
                     self.model.AddAbsEquality(abs_time_diff, time_diff)
                     
+                    # Add a gentle weight of 1 so it tries to balance without breaking other rules
                     penalties.append(abs_time_diff)
             
             self.model.Minimize(sum(penalties))
@@ -428,7 +440,7 @@ if check_password():
                 
             if st.session_state.venue_blocks:
                 v_df = pd.DataFrame(st.session_state.venue_blocks)
-                edited_v_df = st.data_editor(v_df, num_rows="dynamic", column_config={"Date": st.column_config.DateColumn("Date")}, key="v_editor")
+                edited_v_df = st.data_editor(v_df, num_rows="dynamic", column_config={"Date": st.column_config.DateColumn("Date")}, key="v_editor", use_container_width=True)
                 if not edited_v_df.empty:
                     edited_v_df['Date'] = pd.to_datetime(edited_v_df['Date']).dt.date
                 st.session_state.venue_blocks = edited_v_df.to_dict('records')
@@ -444,7 +456,7 @@ if check_password():
                     
             if st.session_state.team_blocks:
                 t_df = pd.DataFrame(st.session_state.team_blocks)
-                edited_t_df = st.data_editor(t_df, num_rows="dynamic", column_config={"Date": st.column_config.DateColumn("Date")}, key="t_editor")
+                edited_t_df = st.data_editor(t_df, num_rows="dynamic", column_config={"Date": st.column_config.DateColumn("Date")}, key="t_editor", use_container_width=True)
                 if not edited_t_df.empty:
                     edited_t_df['Date'] = pd.to_datetime(edited_t_df['Date']).dt.date
                 st.session_state.team_blocks = edited_t_df.to_dict('records')
@@ -478,6 +490,11 @@ if check_password():
 
                 st.session_state.div1_data = extract_division(df_import, 'Division 1')
                 st.session_state.div2_data = extract_division(df_import, 'Division 2')
+                
+                if "div1_ui" in st.session_state:
+                    del st.session_state["div1_ui"]
+                if "div2_ui" in st.session_state:
+                    del st.session_state["div2_ui"]
                 
                 parsed_blocks = []
                 for _, row in df_import.iterrows():
@@ -513,25 +530,13 @@ if check_password():
         }
 
         st.subheader("Division 1")
-        if 'Playing?' not in st.session_state.div1_data.columns:
-            st.session_state.div1_data.insert(0, 'Playing?', True)
-            
         div1_edited = st.data_editor(st.session_state.div1_data, column_config=col_config, num_rows="dynamic", key="div1_ui")
         
         if ui_num_divisions == 2:
             st.subheader("Division 2")
-            if 'Playing?' not in st.session_state.div2_data.columns:
-                st.session_state.div2_data.insert(0, 'Playing?', True)
-                
             div2_edited = st.data_editor(st.session_state.div2_data, column_config=col_config, num_rows="dynamic", key="div2_ui")
-            
         else:
             div2_edited = st.session_state.div2_data
-            if 'Playing?' not in div2_edited.columns:
-                temp_df = div2_edited.copy()
-                temp_df.insert(0, 'Playing?', True)
-                div2_edited = temp_df
-                st.session_state.div2_data = temp_df
 
     with tab4:
         st.header("Clash Checker & Match Exceptions")
@@ -576,7 +581,7 @@ if check_password():
                     
             if st.session_state.match_exceptions:
                 exc_df = pd.DataFrame(st.session_state.match_exceptions)
-                edited_exc_df = st.data_editor(exc_df, num_rows="dynamic", key="exc_editor")
+                edited_exc_df = st.data_editor(exc_df, num_rows="dynamic", key="exc_editor", use_container_width=True)
                 st.session_state.match_exceptions = edited_exc_df.to_dict('records')
 
     with tab5:
@@ -602,7 +607,7 @@ if check_password():
                     df = df.sort_values(by=["SortDate", "Time", "Alley"])
                     df = df[["Date", "Day", "Time", "Home Team Name", "Away Team Name", "Alley", "Division"]]
                     
-                    st.dataframe(df)
+                    st.dataframe(df, use_container_width=True)
                     
                     csv = df.to_csv(index=False).encode('utf-8')
                     st.download_button(label="Download Schedule as CSV", data=csv, file_name="abm_skittles_schedule.csv", mime="text/csv")
