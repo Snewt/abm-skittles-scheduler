@@ -9,7 +9,9 @@ st.set_page_config(page_title="ABM Skittles Scheduler", layout="wide")
 # --- Security ---
 def check_password():
     def password_entered():
-        if st.session_state["password"] == st.secrets["app_password"]:
+        # FIX 1: Defensive secrets checking
+        app_pw = st.secrets.get("app_password")
+        if app_pw and st.session_state.get("password") == app_pw:
             st.session_state["password_correct"] = True
             del st.session_state["password"]  
         else:
@@ -133,23 +135,25 @@ if check_password():
             return allowed
 
         def add_constraints(self):
-            # 1. Total Matches & Exact Home/Away Balance per Pair
+            # FIX 2: Safely using cp_model.LinearExpr.Sum instead of raw python sum()
             for t1 in range(self.num_teams):
                 for t2 in range(t1 + 1, self.num_teams):
                     if self.team_data.iloc[t1]['Division'] == self.team_data.iloc[t2]['Division']:
-                        matches_t1_home = sum(self.play[(t1, t2, w, s, a)] for w in range(self.num_weeks) for s in range(self.num_slots) for a in range(self.num_alleys))
-                        matches_t2_home = sum(self.play[(t2, t1, w, s, a)] for w in range(self.num_weeks) for s in range(self.num_slots) for a in range(self.num_alleys))
+                        matches_t1_home = [self.play[(t1, t2, w, s, a)] for w in range(self.num_weeks) for s in range(self.num_slots) for a in range(self.num_alleys)]
+                        matches_t2_home = [self.play[(t2, t1, w, s, a)] for w in range(self.num_weeks) for s in range(self.num_slots) for a in range(self.num_alleys)]
                         
-                        self.model.Add(matches_t1_home + matches_t2_home == self.matches_per_pair)
+                        t1_sum = cp_model.LinearExpr.Sum(matches_t1_home)
+                        t2_sum = cp_model.LinearExpr.Sum(matches_t2_home)
+                        
+                        self.model.Add(t1_sum + t2_sum == self.matches_per_pair)
                         
                         if self.matches_per_pair % 2 == 0:
-                            self.model.Add(matches_t1_home == self.matches_per_pair // 2)
-                            self.model.Add(matches_t2_home == self.matches_per_pair // 2)
+                            self.model.Add(t1_sum == self.matches_per_pair // 2)
+                            self.model.Add(t2_sum == self.matches_per_pair // 2)
                         else:
-                            self.model.Add(matches_t1_home - matches_t2_home <= 1)
-                            self.model.Add(matches_t2_home - matches_t1_home <= 1)
+                            self.model.Add(t1_sum - t2_sum <= 1)
+                            self.model.Add(t2_sum - t1_sum <= 1)
             
-            # 2. Match Frequency
             for t in range(self.num_teams):
                 for w in range(self.num_weeks):
                     weekly_matches = []
@@ -159,9 +163,8 @@ if check_password():
                                 for a in range(self.num_alleys):
                                     weekly_matches.append(self.play[(t, t2, w, s, a)])
                                     weekly_matches.append(self.play[(t2, t, w, s, a)])
-                    self.model.Add(sum(weekly_matches) <= 1)
+                    self.model.Add(cp_model.LinearExpr.Sum(weekly_matches) <= 1)
 
-            # 3. Double Booking
             for w in range(self.num_weeks):
                 for s in range(self.num_slots):
                     for a in range(self.num_alleys):
@@ -170,9 +173,8 @@ if check_password():
                             for t2 in range(self.num_teams):
                                 if t1 != t2 and (t1, t2, w, s, a) in self.play:
                                     slot_matches.append(self.play[(t1, t2, w, s, a)])
-                        self.model.Add(sum(slot_matches) <= 1)
+                        self.model.Add(cp_model.LinearExpr.Sum(slot_matches) <= 1)
 
-            # 4. Global Home/Away & Alley Balancing
             for t in range(self.num_teams):
                 home_alley_0 = []
                 home_alley_1 = []
@@ -190,23 +192,22 @@ if check_password():
                                     home_alley_1.append(self.play[(t, t2, w, s, 1)])
                                     away_alley_1.append(self.play[(t2, t, w, s, 1)])
                 
-                total_home = sum(home_alley_0) + sum(home_alley_1)
-                total_away = sum(away_alley_0) + sum(away_alley_1)
+                total_home = cp_model.LinearExpr.Sum(home_alley_0 + home_alley_1)
+                total_away = cp_model.LinearExpr.Sum(away_alley_0 + away_alley_1)
                 self.model.Add(total_home - total_away <= 1)
                 self.model.Add(total_away - total_home <= 1)
                 
                 if self.num_alleys == 2:
-                    total_alley_0 = sum(home_alley_0) + sum(away_alley_0)
-                    total_alley_1 = sum(home_alley_1) + sum(away_alley_1)
+                    total_alley_0 = cp_model.LinearExpr.Sum(home_alley_0 + away_alley_0)
+                    total_alley_1 = cp_model.LinearExpr.Sum(home_alley_1 + away_alley_1)
                     self.model.Add(total_alley_0 - total_alley_1 <= 1)
                     self.model.Add(total_alley_1 - total_alley_0 <= 1)
 
-                    self.model.Add(sum(home_alley_0) - sum(home_alley_1) <= 2)
-                    self.model.Add(sum(home_alley_1) - sum(home_alley_0) <= 2)
-                    self.model.Add(sum(away_alley_0) - sum(away_alley_1) <= 2)
-                    self.model.Add(sum(away_alley_1) - sum(away_alley_0) <= 2)
+                    self.model.Add(cp_model.LinearExpr.Sum(home_alley_0) - cp_model.LinearExpr.Sum(home_alley_1) <= 2)
+                    self.model.Add(cp_model.LinearExpr.Sum(home_alley_1) - cp_model.LinearExpr.Sum(home_alley_0) <= 2)
+                    self.model.Add(cp_model.LinearExpr.Sum(away_alley_0) - cp_model.LinearExpr.Sum(away_alley_1) <= 2)
+                    self.model.Add(cp_model.LinearExpr.Sum(away_alley_1) - cp_model.LinearExpr.Sum(away_alley_0) <= 2)
 
-            # 5. Process Day/Time Preferences (With Exceptions Punched Through)
             for t in range(self.num_teams):
                 t_name = self.team_data.iloc[t]['Team Name']
                 row = self.team_data.iloc[t]
@@ -238,7 +239,6 @@ if check_password():
                                                 self.model.Add(self.play[(t, t2, w, s, a)] == 0)
                                                 self.model.Add(self.play[(t2, t, w, s, a)] == 0)
 
-            # 6. Process Specific Date Blocks
             for w in range(self.num_weeks):
                 week_start = self.play_weeks[w]
                 for s in range(self.num_slots):
@@ -265,10 +265,8 @@ if check_password():
                                                 self.model.Add(self.play[(t, t2, w, s, a)] == 0)
                                                 self.model.Add(self.play[(t2, t, w, s, a)] == 0)
 
-            # 7. Soft Preferences, Anti-Clumping & Time Parity
             penalties = []
             
-            # --- Anti-Clumping (Days) ---
             team_day_vars = {}
             for t in range(self.num_teams):
                 for w in range(self.num_weeks):
@@ -280,7 +278,7 @@ if check_password():
                                     for a in range(self.num_alleys):
                                         matches_this_day.append(self.play[(t, t2, w, s, a)])
                                         matches_this_day.append(self.play[(t2, t, w, s, a)])
-                        team_day_vars[(t, w, d)] = sum(matches_this_day)
+                        team_day_vars[(t, w, d)] = cp_model.LinearExpr.Sum(matches_this_day)
 
             for t in range(self.num_teams):
                 for w in range(self.num_weeks - 2):
@@ -290,11 +288,9 @@ if check_password():
                         self.model.Add(penalty_var >= window_sum - 1)
                         penalties.extend([penalty_var, penalty_var])
 
-            # --- Time Parity (8pm vs 9pm) ---
             for t, row in self.team_data.iterrows():
                 pref = row['Prefers Time']
                 
-                # Gather all 8:00 pm and 9:00 pm variables for this specific team
                 matches_8pm = []
                 matches_9pm = []
                 for t2 in range(self.num_teams):
@@ -309,26 +305,24 @@ if check_password():
                                             matches_9pm.extend([self.play[(t, t2, w, s, a)], self.play[(t2, t, w, s, a)]])
 
                 if pref == "8:00 pm":
-                    # Hard penalty for playing at 9:00 pm
                     for var in matches_9pm:
                         penalties.extend([var, var])
                 elif pref == "9:00 pm":
-                    # Hard penalty for playing at 8:00 pm
                     for var in matches_8pm:
                         penalties.extend([var, var])
                 else:
-                    # Soft Parity: Try to keep 8pm and 9pm games equal for "No Preference" teams
                     max_matches = self.num_teams * self.matches_per_pair
                     time_diff = self.model.NewIntVar(-max_matches, max_matches, f'time_diff_t{t}')
                     abs_time_diff = self.model.NewIntVar(0, max_matches, f'abs_time_diff_t{t}')
                     
-                    self.model.Add(time_diff == sum(matches_8pm) - sum(matches_9pm))
+                    self.model.Add(time_diff == cp_model.LinearExpr.Sum(matches_8pm) - cp_model.LinearExpr.Sum(matches_9pm))
                     self.model.AddAbsEquality(abs_time_diff, time_diff)
                     
-                    # Add a gentle weight of 1 so it tries to balance without breaking other rules
                     penalties.append(abs_time_diff)
             
-            self.model.Minimize(sum(penalties))
+            # FIX 3: Prevent TypeError if penalties list is totally empty
+            if penalties:
+                self.model.Minimize(cp_model.LinearExpr.Sum(penalties))
 
         def solve(self):
             self.add_constraints()
@@ -440,7 +434,7 @@ if check_password():
                 
             if st.session_state.venue_blocks:
                 v_df = pd.DataFrame(st.session_state.venue_blocks)
-                edited_v_df = st.data_editor(v_df, num_rows="dynamic", column_config={"Date": st.column_config.DateColumn("Date")}, key="v_editor", use_container_width=True)
+                edited_v_df = st.data_editor(v_df, num_rows="dynamic", column_config={"Date": st.column_config.DateColumn("Date")}, key="v_editor")
                 if not edited_v_df.empty:
                     edited_v_df['Date'] = pd.to_datetime(edited_v_df['Date']).dt.date
                 st.session_state.venue_blocks = edited_v_df.to_dict('records')
@@ -456,7 +450,7 @@ if check_password():
                     
             if st.session_state.team_blocks:
                 t_df = pd.DataFrame(st.session_state.team_blocks)
-                edited_t_df = st.data_editor(t_df, num_rows="dynamic", column_config={"Date": st.column_config.DateColumn("Date")}, key="t_editor", use_container_width=True)
+                edited_t_df = st.data_editor(t_df, num_rows="dynamic", column_config={"Date": st.column_config.DateColumn("Date")}, key="t_editor")
                 if not edited_t_df.empty:
                     edited_t_df['Date'] = pd.to_datetime(edited_t_df['Date']).dt.date
                 st.session_state.team_blocks = edited_t_df.to_dict('records')
@@ -475,26 +469,18 @@ if check_password():
                     div_df = df[df['Division'] == div_name].copy()
                     if div_df.empty:
                         return pd.DataFrame()
-                    
-                    div_df = div_df.reset_index(drop=True)
-                    
                     res = pd.DataFrame()
-                    res['Playing?'] = [True] * len(div_df) 
+                    res['Playing?'] = [True] * len(div_df)
                     res['Team Name'] = div_df['Team Name']
                     res['Monday'] = div_df['Monday']
                     res['Tuesday'] = div_df['Tuesday']
                     res['Wednesday'] = div_df['Wednesday']
                     res['Thursday'] = div_df['Thursday']
                     res['Prefers Time'] = div_df['Prefers Time']
-                    return res
+                    return res.reset_index(drop=True)
 
                 st.session_state.div1_data = extract_division(df_import, 'Division 1')
                 st.session_state.div2_data = extract_division(df_import, 'Division 2')
-                
-                if "div1_ui" in st.session_state:
-                    del st.session_state["div1_ui"]
-                if "div2_ui" in st.session_state:
-                    del st.session_state["div2_ui"]
                 
                 parsed_blocks = []
                 for _, row in df_import.iterrows():
@@ -515,9 +501,9 @@ if check_password():
                                 except ValueError:
                                     st.warning(f"Could not automatically read date '{rd}' for team '{t_name}'. Please add it manually in Tab 2.")
                 st.session_state.team_blocks.extend(parsed_blocks)
-                st.success("Data successfully synced!")
+                st.success("Data successfully synced! (Please refresh the page to update the tables).")
             except Exception as e:
-                st.error(f"Failed to fetch data. Please check the link is correct and publicly shared. Error: {e}")
+                st.error(f"Failed to fetch data. Error: {e}")
 
         day_options = ["Any", "8:00 pm only", "9:00 pm only", "Unavailable"]
         col_config = {
@@ -541,10 +527,15 @@ if check_password():
     with tab4:
         st.header("Clash Checker & Match Exceptions")
         
-        d1 = div1_edited[div1_edited['Playing?'] == True].copy()
+        d1 = div1_edited.copy()
+        if 'Playing?' in d1.columns:
+            d1 = d1[d1['Playing?'] == True]
         d1['Division'] = 'Division 1'
+        
         if ui_num_divisions == 2:
-            d2 = div2_edited[div2_edited['Playing?'] == True].copy()
+            d2 = div2_edited.copy()
+            if 'Playing?' in d2.columns:
+                d2 = d2[d2['Playing?'] == True]
             d2['Division'] = 'Division 2'
             full_teams = pd.concat([d1, d2], ignore_index=True)
         else:
@@ -581,7 +572,7 @@ if check_password():
                     
             if st.session_state.match_exceptions:
                 exc_df = pd.DataFrame(st.session_state.match_exceptions)
-                edited_exc_df = st.data_editor(exc_df, num_rows="dynamic", key="exc_editor", use_container_width=True)
+                edited_exc_df = st.data_editor(exc_df, num_rows="dynamic", key="exc_editor")
                 st.session_state.match_exceptions = edited_exc_df.to_dict('records')
 
     with tab5:
@@ -607,7 +598,7 @@ if check_password():
                     df = df.sort_values(by=["SortDate", "Time", "Alley"])
                     df = df[["Date", "Day", "Time", "Home Team Name", "Away Team Name", "Alley", "Division"]]
                     
-                    st.dataframe(df, use_container_width=True)
+                    st.dataframe(df)
                     
                     csv = df.to_csv(index=False).encode('utf-8')
                     st.download_button(label="Download Schedule as CSV", data=csv, file_name="abm_skittles_schedule.csv", mime="text/csv")
