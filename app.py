@@ -278,15 +278,24 @@ if check_password():
                                         matches_this_day.append(self.play[(t2, t, w, s, a)])
                         team_day_vars[(t, w, d)] = cp_model.LinearExpr.Sum(matches_this_day)
 
+            # --- Anti-Clumping (Days) ---
             for t in range(self.num_teams):
                 for w in range(self.num_weeks - 2):
                     for d in range(4):
                         window_sum = team_day_vars[(t, w, d)] + team_day_vars[(t, w+1, d)] + team_day_vars[(t, w+2, d)]
-                        self.model.Add(window_sum <= 2)
-                        penalty_var = self.model.NewIntVar(0, 3, f'pen_clump_t{t}_w{w}_d{d}')
-                        self.model.Add(penalty_var >= window_sum - 1)
-                        penalties.extend([penalty_var, penalty_var])
+                        
+                        is_two_clump = self.model.NewBoolVar(f'two_clump_t{t}_w{w}_d{d}')
+                        is_three_clump = self.model.NewBoolVar(f'three_clump_t{t}_w{w}_d{d}')
+                        
+                        self.model.Add(window_sum >= 2).OnlyEnforceIf(is_two_clump)
+                        self.model.Add(window_sum < 2).OnlyEnforceIf(is_two_clump.Not())
+                        self.model.Add(window_sum >= 3).OnlyEnforceIf(is_three_clump)
+                        self.model.Add(window_sum < 3).OnlyEnforceIf(is_three_clump.Not())
+                        
+                        penalties.append(is_two_clump)                              # weight 1
+                        penalties.extend([is_three_clump] * 100)                    # weight 100
 
+            # --- Time Parity (8pm vs 9pm) ---
             for t, row in self.team_data.iterrows():
                 pref = row['Prefers Time']
                 
@@ -424,7 +433,7 @@ if check_password():
         
         with col_a:
             st.subheader("Add Venue/Alley Block")
-            v_date = st.date_input("Date(s) Closed (Select one date, or start and end date)", value=[], key="v_date")
+            v_date = st.date_input("Date(s) Closed (Select one date, or a start and end date)", value=[], key="v_date")
             v_scope = st.selectbox("What is closed?", ["Whole Club", "Alley 1", "Alley 2"])
             if st.button("Add Venue Block"):
                 dates = []
@@ -455,7 +464,7 @@ if check_password():
 
         with col_b:
             st.subheader("Add Specific Team Block")
-            t_date = st.date_input("Date(s) Unavailable (Select one date, or start and end date)", value=[], key="t_date")
+            t_date = st.date_input("Date(s) Unavailable (Select one date, or a start and end date)", value=[], key="t_date")
             t_team = st.text_input("Exact Team Name")
             if st.button("Add Team Block"):
                 dates = []
@@ -500,10 +509,6 @@ if check_password():
                     div_df = df[df['Division'] == div_name].copy()
                     if div_df.empty:
                         return pd.DataFrame()
-                    
-                    # --- THE FIX: Wipe out original row numbering to prevent "None" entries ---
-                    div_df = div_df.reset_index(drop=True)
-                    
                     res = pd.DataFrame()
                     res['Playing?'] = [True] * len(div_df)
                     res['Team Name'] = div_df['Team Name']
@@ -512,7 +517,7 @@ if check_password():
                     res['Wednesday'] = div_df['Wednesday']
                     res['Thursday'] = div_df['Thursday']
                     res['Prefers Time'] = div_df['Prefers Time']
-                    return res
+                    return res.reset_index(drop=True)
 
                 st.session_state.div1_data = extract_division(df_import, 'Division 1')
                 st.session_state.div2_data = extract_division(df_import, 'Division 2')
@@ -551,13 +556,30 @@ if check_password():
         }
 
         st.subheader("Division 1")
+        if 'Playing?' not in st.session_state.div1_data.columns:
+            st.session_state.div1_data.insert(0, 'Playing?', True)
+            
         div1_edited = st.data_editor(st.session_state.div1_data, column_config=col_config, num_rows="dynamic", key="div1_ui")
         
+        if 'Playing?' not in div1_edited.columns:
+            div1_edited.insert(0, 'Playing?', True)
+            
         if ui_num_divisions == 2:
             st.subheader("Division 2")
+            if 'Playing?' not in st.session_state.div2_data.columns:
+                st.session_state.div2_data.insert(0, 'Playing?', True)
+                
             div2_edited = st.data_editor(st.session_state.div2_data, column_config=col_config, num_rows="dynamic", key="div2_ui")
+            
+            if 'Playing?' not in div2_edited.columns:
+                div2_edited.insert(0, 'Playing?', True)
         else:
             div2_edited = st.session_state.div2_data
+            if 'Playing?' not in div2_edited.columns:
+                temp_df = div2_edited.copy()
+                temp_df.insert(0, 'Playing?', True)
+                div2_edited = temp_df
+                st.session_state.div2_data = temp_df
 
     with tab4:
         st.header("Clash Checker & Match Exceptions")
