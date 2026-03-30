@@ -539,13 +539,21 @@ if check_password():
         }
 
         st.subheader("Division 1")
-        div1_edited = st.data_editor(st.session_state.div1_data, column_config=col_config, num_rows="dynamic", key="div1_ui")
+        div1_edited = st.data_editor(st.session_state.div1_data, column_config=col_config, num_rows="dynamic", key="div1_ui", width="stretch")
         
+        # --- THE FAILSAFE: Check and patch missing columns caused by cache ---
+        if 'Playing?' not in div1_edited.columns:
+            div1_edited['Playing?'] = True
+            
         if ui_num_divisions == 2:
             st.subheader("Division 2")
-            div2_edited = st.data_editor(st.session_state.div2_data, column_config=col_config, num_rows="dynamic", key="div2_ui")
+            div2_edited = st.data_editor(st.session_state.div2_data, column_config=col_config, num_rows="dynamic", key="div2_ui", width="stretch")
+            if 'Playing?' not in div2_edited.columns:
+                div2_edited['Playing?'] = True
         else:
             div2_edited = st.session_state.div2_data
+            if 'Playing?' not in div2_edited.columns:
+                div2_edited['Playing?'] = True
 
     with tab4:
         st.header("Clash Checker & Match Exceptions")
