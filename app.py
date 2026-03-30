@@ -420,12 +420,18 @@ if check_password():
         
         with col_a:
             st.subheader("Add Venue/Alley Block")
-            v_date = st.date_input("Date(s) Closed (Click twice for range)", value=[], key="v_date", format="DD/MM/YYYY")
+            v_date = st.date_input("Date(s) Closed (Select one date, or a start and end date)", value=[], key="v_date")
             v_scope = st.selectbox("What is closed?", ["Whole Club", "Alley 1", "Alley 2"])
             if st.button("Add Venue Block"):
-                if len(v_date) > 0:
-                    start_d = v_date[0]
-                    end_d = v_date[1] if len(v_date) > 1 else v_date[0]
+                dates = []
+                if isinstance(v_date, (list, tuple)):
+                    dates = list(v_date)
+                elif v_date:
+                    dates = [v_date]
+
+                if len(dates) > 0:
+                    start_d = dates[0]
+                    end_d = dates[1] if len(dates) > 1 else dates[0]
                     
                     current = start_d
                     while current <= end_d:
@@ -438,19 +444,25 @@ if check_password():
                 
             if st.session_state.venue_blocks:
                 v_df = pd.DataFrame(st.session_state.venue_blocks)
-                edited_v_df = st.data_editor(v_df, num_rows="dynamic", column_config={"Date": st.column_config.DateColumn("Date", format="DD/MM/YYYY")}, key="v_editor")
+                edited_v_df = st.data_editor(v_df, num_rows="dynamic", column_config={"Date": st.column_config.DateColumn("Date")}, key="v_editor")
                 if not edited_v_df.empty:
                     edited_v_df['Date'] = pd.to_datetime(edited_v_df['Date']).dt.date
                 st.session_state.venue_blocks = edited_v_df.to_dict('records')
 
         with col_b:
             st.subheader("Add Specific Team Block")
-            t_date = st.date_input("Date(s) Unavailable (Click twice for range)", value=[], key="t_date", format="DD/MM/YYYY")
+            t_date = st.date_input("Date(s) Unavailable (Select one date, or a start and end date)", value=[], key="t_date")
             t_team = st.text_input("Exact Team Name")
             if st.button("Add Team Block"):
-                if t_team and len(t_date) > 0:
-                    start_d = t_date[0]
-                    end_d = t_date[1] if len(t_date) > 1 else t_date[0]
+                dates = []
+                if isinstance(t_date, (list, tuple)):
+                    dates = list(t_date)
+                elif t_date:
+                    dates = [t_date]
+
+                if t_team and len(dates) > 0:
+                    start_d = dates[0]
+                    end_d = dates[1] if len(dates) > 1 else dates[0]
                     
                     current = start_d
                     while current <= end_d:
@@ -465,7 +477,7 @@ if check_password():
                     
             if st.session_state.team_blocks:
                 t_df = pd.DataFrame(st.session_state.team_blocks)
-                edited_t_df = st.data_editor(t_df, num_rows="dynamic", column_config={"Date": st.column_config.DateColumn("Date", format="DD/MM/YYYY")}, key="t_editor")
+                edited_t_df = st.data_editor(t_df, num_rows="dynamic", column_config={"Date": st.column_config.DateColumn("Date")}, key="t_editor")
                 if not edited_t_df.empty:
                     edited_t_df['Date'] = pd.to_datetime(edited_t_df['Date']).dt.date
                 st.session_state.team_blocks = edited_t_df.to_dict('records')
@@ -499,11 +511,6 @@ if check_password():
 
                 st.session_state.div1_data = extract_division(df_import, 'Division 1')
                 st.session_state.div2_data = extract_division(df_import, 'Division 2')
-                
-                if "div1_ui" in st.session_state:
-                    del st.session_state["div1_ui"]
-                if "div2_ui" in st.session_state:
-                    del st.session_state["div2_ui"]
                 
                 parsed_blocks = []
                 for _, row in df_import.iterrows():
@@ -539,29 +546,28 @@ if check_password():
         }
 
         st.subheader("Division 1")
-        
-        # --- THE SAFE FAILSAFE ---
         if 'Playing?' not in st.session_state.div1_data.columns:
-            temp_df = st.session_state.div1_data.copy()
-            temp_df.insert(0, 'Playing?', True)
-            st.session_state.div1_data = temp_df
+            st.session_state.div1_data.insert(0, 'Playing?', True)
             
         div1_edited = st.data_editor(st.session_state.div1_data, column_config=col_config, num_rows="dynamic", key="div1_ui")
         
+        # Super-safe post-edit patch
+        if 'Playing?' not in div1_edited.columns:
+            div1_edited.insert(0, 'Playing?', True)
+            
         if ui_num_divisions == 2:
             st.subheader("Division 2")
             if 'Playing?' not in st.session_state.div2_data.columns:
-                temp_df = st.session_state.div2_data.copy()
-                temp_df.insert(0, 'Playing?', True)
-                st.session_state.div2_data = temp_df
+                st.session_state.div2_data.insert(0, 'Playing?', True)
+                
             div2_edited = st.data_editor(st.session_state.div2_data, column_config=col_config, num_rows="dynamic", key="div2_ui")
+            
+            if 'Playing?' not in div2_edited.columns:
+                div2_edited.insert(0, 'Playing?', True)
         else:
             div2_edited = st.session_state.div2_data
             if 'Playing?' not in div2_edited.columns:
-                temp_df = div2_edited.copy()
-                temp_df.insert(0, 'Playing?', True)
-                div2_edited = temp_df
-                st.session_state.div2_data = temp_df
+                div2_edited.insert(0, 'Playing?', True)
 
     with tab4:
         st.header("Clash Checker & Match Exceptions")
