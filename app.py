@@ -423,7 +423,6 @@ if check_password():
         
         with col_a:
             st.subheader("Add Venue/Alley Block")
-            # FIX: We use value=[] for range picking, but NO format="DD/MM/YYYY"
             v_date = st.date_input("Date(s) Closed (Select one date, or start and end date)", value=[], key="v_date")
             v_scope = st.selectbox("What is closed?", ["Whole Club", "Alley 1", "Alley 2"])
             if st.button("Add Venue Block"):
@@ -500,6 +499,10 @@ if check_password():
                     div_df = df[df['Division'] == div_name].copy()
                     if div_df.empty:
                         return pd.DataFrame()
+                    
+                    # --- THE FIX: Wipe out original row numbering to prevent "None" entries ---
+                    div_df = div_df.reset_index(drop=True)
+                    
                     res = pd.DataFrame()
                     res['Playing?'] = [True] * len(div_df)
                     res['Team Name'] = div_df['Team Name']
@@ -508,7 +511,7 @@ if check_password():
                     res['Wednesday'] = div_df['Wednesday']
                     res['Thursday'] = div_df['Thursday']
                     res['Prefers Time'] = div_df['Prefers Time']
-                    return res.reset_index(drop=True)
+                    return res
 
                 st.session_state.div1_data = extract_division(df_import, 'Division 1')
                 st.session_state.div2_data = extract_division(df_import, 'Division 2')
