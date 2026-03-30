@@ -99,12 +99,18 @@ if check_password():
             self.num_slots = 8 
             self.num_alleys = num_alleys
             
-            # --- THE F1 ENGINE UPGRADE: Halving the variables ---
             self.pairs = [
                 (t1, t2) for t1 in range(self.num_teams) 
                 for t2 in range(t1 + 1, self.num_teams) 
                 if self.team_data.iloc[t1]['Division'] == self.team_data.iloc[t2]['Division']
             ]
+            
+            # For diagnostics
+            self.team_names = list(self.team_data["Team Name"])
+            self.valid_slots = {
+                t: get_available_slots(self.team_data.iloc[t])
+                for t in range(self.num_teams)
+            }
             
         def _build(self):
             self.model = cp_model.CpModel()
@@ -121,7 +127,6 @@ if check_password():
                             self.match[key] = self.model.NewBoolVar(f'm_{t1}_{t2}_{w}_{s}_{a}')
                             self.home[key] = self.model.NewBoolVar(f'h_{t1}_{t2}_{w}_{s}_{a}')
                             
-                            # --- GHOST HOME FIX ---
                             self.model.Add(self.home[key] <= self.match[key])
 
         def get_overridden_slots(self, t1_name, t2_name):
@@ -177,7 +182,7 @@ if check_password():
                         if slot_vars:
                             self.model.Add(cp_model.LinearExpr.Sum(slot_vars) <= 1)
 
-            # 4. Handle Specific Unavailable Days & Exceptions (SAFE GET METHOD)
+            # 4. Handle Specific Unavailable Days & Exceptions
             for t in range(self.num_teams):
                 t_name = self.team_data.iloc[t]['Team Name']
                 row = self.team_data.iloc[t]
@@ -207,7 +212,7 @@ if check_password():
                                             if var is not None:
                                                 self.model.Add(var == 0)
 
-            # 5. Handle Venue & Team Specific Dates (SAFE GET METHOD)
+            # 5. Handle Venue & Team Specific Dates
             for w in range(self.num_weeks):
                 week_start = self.play_weeks[w]
                 for s in range(self.num_slots):
@@ -269,7 +274,7 @@ if check_password():
                                     d = s // 2
                                     team_day_vars[(w, d)].append(m)
 
-                # Overall Home/Away Balance (Global)
+                # Overall Home/Away Balance
                 ha_diff = self.model.NewIntVar(-max_matches, max_matches, f"ha_diff_{t}")
                 ha_abs = self.model.NewIntVar(0, max_matches, f"ha_abs_{t}")
                 self.model.Add(ha_diff == cp_model.LinearExpr.Sum(home_vars) - cp_model.LinearExpr.Sum(away_vars))
@@ -318,12 +323,43 @@ if check_password():
                             self.model.Add(window_sum < 3).OnlyEnforceIf(is_three_clump.Not())
                             
                             penalties.append(is_two_clump * 1)
-                            penalties.append(is_three_clump * 100) # Memory safe!
+                            penalties.append(is_three_clump * 100) 
 
             if penalties:
                 self.model.Minimize(cp_model.LinearExpr.Sum(penalties))
 
-        # --- THE CASCADING SOLVER: Guaranteed answers ---
+        # --- DIAGNOSTIC X-RAY ---
+        def diagnose_failure(self):
+            issues = []
+            
+            # Math check 1: Are there enough slots in the year?
+            total_required = len(self.pairs) * self.matches_per_pair
+            total_slots = self.num_weeks * self.num_slots * self.num_alleys
+            
+            if total_slots < total_required:
+                issues.append(f"Not enough total slots in the calendar to complete the season. Requires {total_required} slots, but only {total_slots} are available before closures.")
+
+            # Math check 2: Do the teams actually overlap?
+            def has_valid_exception(t1_name, t2_name):
+                for exc in self.match_exceptions:
+                    if (exc['Team 1'] == t1_name and exc['Team 2'] == t2_name) or \
+                       (exc['Team 1'] == t2_name and exc['Team 2'] == t1_name):
+                        return True
+                return False
+
+            for (t1, t2) in self.pairs:
+                valid = any(
+                    s in self.valid_slots[t1] and s in self.valid_slots[t2]
+                    for s in range(self.num_slots)
+                )
+                if not valid:
+                    name1 = self.team_names[t1]
+                    name2 = self.team_names[t2]
+                    if not has_valid_exception(name1, name2):
+                        issues.append(f"No overlapping days available for {name1} vs {name2}.")
+
+            return issues
+
         def solve(self, time_limit):
             def run_attempt(msg, r_time, r_clump, t_limit):
                 self._build()
@@ -338,18 +374,18 @@ if check_password():
 
             # Attempt 1: Strict Mode
             res, status, msg = run_attempt("Optimal Solution Found!", False, False, time_limit)
-            if res: return res, status, msg
+            if res: return {"error": False, "message": msg, "data": res}
             
             if status == cp_model.INFEASIBLE:
                 # Attempt 2: Relax Time Preferences slightly
                 res, status, msg = run_attempt("Solution found by relaxing strict Time Preferences", True, False, time_limit * 0.5)
-                if res: return res, status, msg
+                if res: return {"error": False, "message": msg, "data": res}
                 
                 # Attempt 3: Relax Time & Clumping Rules
                 res, status, msg = run_attempt("Solution found by relaxing Time & Clumping Rules (Schedule was very tight)", True, True, time_limit * 0.5)
-                if res: return res, status, msg
+                if res: return {"error": False, "message": msg, "data": res}
             
-            return None, status, "Failed"
+            return {"error": True, "diagnostics": self.diagnose_failure()}
 
         def _extract(self, solver):
             results = []
@@ -408,6 +444,8 @@ if check_password():
         st.session_state.div2_data = create_default_df("D2", 10)
     if 'sync_key' not in st.session_state:
         st.session_state.sync_key = 0
+    if 'schedule_result' not in st.session_state:
+        st.session_state.schedule_result = None
 
     # --- User Interface ---
     st.title("ABM Skittles Scheduler")
@@ -548,7 +586,6 @@ if check_password():
                                     continue
                             parsed_blocks.append({"Date": p_date, "Team": t_name})
                             
-                # SAFE DEDUPLICATION FIX
                 existing = {(b['Date'], b['Team']) for b in st.session_state.team_blocks}
                 for pb in parsed_blocks:
                     if (pb['Date'], pb['Team']) not in existing:
@@ -644,6 +681,7 @@ if check_password():
     with tab5:
         st.header("Generate Schedule")
         
+        # 1. THE BUTTON - Triggers calculation and saves to memory
         if st.button("Run Optimisation Engine", type="primary"):
             with st.spinner("Calculating... Note: The engine will now automatically relax rules if it hits a mathematical brick wall."):
                 scheduler = ABMSchedulerEngine(
@@ -656,18 +694,32 @@ if check_password():
                     num_alleys=ui_num_alleys
                 )
                 
-                # Run the cascading solver with the UI timeout
-                schedule_data, status, msg = scheduler.solve(time_limit=ui_timeout)
-                
-                if status in (cp_model.OPTIMAL, cp_model.FEASIBLE) and schedule_data:
-                    st.success(f"Success! {msg}")
-                    df = pd.DataFrame(schedule_data)
+                # Save the raw dictionary to Streamlit's permanent session state
+                st.session_state.schedule_result = scheduler.solve(time_limit=ui_timeout)
+
+        # 2. THE DISPLAY - Reads from memory so it survives UI updates
+        if st.session_state.schedule_result is not None:
+            result = st.session_state.schedule_result
+            
+            if isinstance(result, dict):
+                if result.get("error"):
+                    st.error("❌ No valid schedule found")
+                    for issue in result.get("diagnostics", []):
+                        st.warning(issue)
+                else:
+                    st.success(result["message"])
+                    
+                    df = pd.DataFrame(result["data"])
                     df = df.sort_values(by=["SortDate", "Time", "Alley"])
-                    df = df[["Date", "Day", "Time", "Home Team Name", "Away Team Name", "Alley", "Division"]]
                     
-                    st.dataframe(df)
+                    df_display = df[[
+                        "Date", "Day", "Time", 
+                        "Home Team Name", "Away Team Name", 
+                        "Alley"
+                    ]]
                     
-                    # Added bonus: The Team View from the Candidate Audit!
+                    st.dataframe(df_display)
+                    
                     st.subheader("👥 Quick Team View")
                     team = st.selectbox("Select a Team to filter:", sorted(pd.concat([df["Home Team Name"], df["Away Team Name"]]).unique()))
                     tdf = df[(df["Home Team Name"] == team) | (df["Away Team Name"] == team)]
@@ -675,10 +727,3 @@ if check_password():
                     
                     csv = df.to_csv(index=False).encode('utf-8')
                     st.download_button(label="Download Schedule as CSV", data=csv, file_name="abm_skittles_schedule.csv", mime="text/csv")
-                else:
-                    if status == cp_model.INFEASIBLE:
-                        st.error("🚨 The engine couldn't find a solution (Infeasible). The constraints are mathematically impossible. Please check Tab 4 for Clashes, or try relaxing Venue/Team specific date blocks.")
-                    elif status == cp_model.MODEL_INVALID:
-                        st.error("🚨 The model is invalid. A background constraint was formed incorrectly.")
-                    else:
-                        st.error("🚨 The solver timed out before it could find an answer. Try increasing the Solver Time Limit slider in Tab 1.")
