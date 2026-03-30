@@ -282,6 +282,7 @@ if check_password():
                 for w in range(self.num_weeks - 2):
                     for d in range(4):
                         window_sum = team_day_vars[(t, w, d)] + team_day_vars[(t, w+1, d)] + team_day_vars[(t, w+2, d)]
+                        self.model.Add(window_sum <= 2)
                         penalty_var = self.model.NewIntVar(0, 3, f'pen_clump_t{t}_w{w}_d{d}')
                         self.model.Add(penalty_var >= window_sum - 1)
                         penalties.extend([penalty_var, penalty_var])
