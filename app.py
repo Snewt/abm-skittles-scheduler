@@ -420,27 +420,11 @@ if check_password():
         
         with col_a:
             st.subheader("Add Venue/Alley Block")
-            v_date = st.date_input("Date(s) Closed (Select one date, or a start and end date)", value=[], key="v_date")
+            v_date = st.date_input("Date Closed", key="v_date")
             v_scope = st.selectbox("What is closed?", ["Whole Club", "Alley 1", "Alley 2"])
             if st.button("Add Venue Block"):
-                dates = []
-                if isinstance(v_date, (list, tuple)):
-                    dates = list(v_date)
-                elif v_date:
-                    dates = [v_date]
-
-                if len(dates) > 0:
-                    start_d = dates[0]
-                    end_d = dates[1] if len(dates) > 1 else dates[0]
-                    
-                    current = start_d
-                    while current <= end_d:
-                        if not any(b['Date'] == current and b['Scope'] == v_scope for b in st.session_state.venue_blocks):
-                            st.session_state.venue_blocks.append({"Date": current, "Scope": v_scope})
-                        current += datetime.timedelta(days=1)
-                    st.rerun()
-                else:
-                    st.warning("Please select at least one date.")
+                st.session_state.venue_blocks.append({"Date": v_date, "Scope": v_scope})
+                st.rerun()
                 
             if st.session_state.venue_blocks:
                 v_df = pd.DataFrame(st.session_state.venue_blocks)
@@ -451,29 +435,12 @@ if check_password():
 
         with col_b:
             st.subheader("Add Specific Team Block")
-            t_date = st.date_input("Date(s) Unavailable (Select one date, or a start and end date)", value=[], key="t_date")
+            t_date = st.date_input("Date Unavailable", key="t_date")
             t_team = st.text_input("Exact Team Name")
             if st.button("Add Team Block"):
-                dates = []
-                if isinstance(t_date, (list, tuple)):
-                    dates = list(t_date)
-                elif t_date:
-                    dates = [t_date]
-
-                if t_team and len(dates) > 0:
-                    start_d = dates[0]
-                    end_d = dates[1] if len(dates) > 1 else dates[0]
-                    
-                    current = start_d
-                    while current <= end_d:
-                        if not any(b['Date'] == current and b['Team'] == t_team for b in st.session_state.team_blocks):
-                            st.session_state.team_blocks.append({"Date": current, "Team": t_team})
-                        current += datetime.timedelta(days=1)
+                if t_team:
+                    st.session_state.team_blocks.append({"Date": t_date, "Team": t_team})
                     st.rerun()
-                elif not t_team:
-                    st.warning("Please enter a team name.")
-                else:
-                    st.warning("Please select at least one date.")
                     
             if st.session_state.team_blocks:
                 t_df = pd.DataFrame(st.session_state.team_blocks)
@@ -549,22 +516,15 @@ if check_password():
         if 'Playing?' not in st.session_state.div1_data.columns:
             st.session_state.div1_data.insert(0, 'Playing?', True)
             
-        # --- THE FIX: Unique new keys bypass the old corrupted memory ---
-        div1_edited = st.data_editor(st.session_state.div1_data, column_config=col_config, num_rows="dynamic", key="div1_table_v2")
+        div1_edited = st.data_editor(st.session_state.div1_data, column_config=col_config, num_rows="dynamic", key="div1_ui")
         
-        if 'Playing?' not in div1_edited.columns:
-            div1_edited.insert(0, 'Playing?', True)
-            
         if ui_num_divisions == 2:
             st.subheader("Division 2")
             if 'Playing?' not in st.session_state.div2_data.columns:
                 st.session_state.div2_data.insert(0, 'Playing?', True)
                 
-            # --- THE FIX: Unique new keys bypass the old corrupted memory ---
-            div2_edited = st.data_editor(st.session_state.div2_data, column_config=col_config, num_rows="dynamic", key="div2_table_v2")
+            div2_edited = st.data_editor(st.session_state.div2_data, column_config=col_config, num_rows="dynamic", key="div2_ui")
             
-            if 'Playing?' not in div2_edited.columns:
-                div2_edited.insert(0, 'Playing?', True)
         else:
             div2_edited = st.session_state.div2_data
             if 'Playing?' not in div2_edited.columns:
