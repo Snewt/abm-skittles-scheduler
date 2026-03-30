@@ -292,8 +292,8 @@ if check_password():
                         self.model.Add(window_sum >= 3).OnlyEnforceIf(is_three_clump)
                         self.model.Add(window_sum < 3).OnlyEnforceIf(is_three_clump.Not())
                         
-                        penalties.append(is_two_clump)                              # weight 1
-                        penalties.extend([is_three_clump] * 100)                    # weight 100
+                        penalties.append(is_two_clump)                              
+                        penalties.extend([is_three_clump] * 100)                    
 
             # --- Time Parity (8pm vs 9pm) ---
             for t, row in self.team_data.iterrows():
@@ -396,6 +396,8 @@ if check_password():
         st.session_state.div1_data = create_default_df("D1", 10)
     if 'div2_data' not in st.session_state:
         st.session_state.div2_data = create_default_df("D2", 10)
+    if 'sync_key' not in st.session_state:
+        st.session_state.sync_key = 0
 
     # --- User Interface ---
     st.title("ABM Skittles Scheduler")
@@ -509,6 +511,10 @@ if check_password():
                     div_df = df[df['Division'] == div_name].copy()
                     if div_df.empty:
                         return pd.DataFrame()
+                    
+                    # --- FIX 1: Reset index BEFORE creating the new dataframe ---
+                    div_df = div_df.reset_index(drop=True)
+                    
                     res = pd.DataFrame()
                     res['Playing?'] = [True] * len(div_df)
                     res['Team Name'] = div_df['Team Name']
@@ -517,7 +523,7 @@ if check_password():
                     res['Wednesday'] = div_df['Wednesday']
                     res['Thursday'] = div_df['Thursday']
                     res['Prefers Time'] = div_df['Prefers Time']
-                    return res.reset_index(drop=True)
+                    return res
 
                 st.session_state.div1_data = extract_division(df_import, 'Division 1')
                 st.session_state.div2_data = extract_division(df_import, 'Division 2')
@@ -541,7 +547,11 @@ if check_password():
                                 except ValueError:
                                     st.warning(f"Could not automatically read date '{rd}' for team '{t_name}'. Please add it manually in Tab 2.")
                 st.session_state.team_blocks.extend(parsed_blocks)
-                st.success("Data successfully synced! (Please refresh the page to update the tables).")
+                
+                # --- FIX 2: Increment the sync key to dynamically rename tables and bypass the cache ---
+                st.session_state.sync_key += 1
+                
+                st.success("Data successfully synced!")
             except Exception as e:
                 st.error(f"Failed to fetch data. Error: {e}")
 
@@ -556,30 +566,15 @@ if check_password():
         }
 
         st.subheader("Division 1")
-        if 'Playing?' not in st.session_state.div1_data.columns:
-            st.session_state.div1_data.insert(0, 'Playing?', True)
-            
-        div1_edited = st.data_editor(st.session_state.div1_data, column_config=col_config, num_rows="dynamic", key="div1_ui")
+        # Apply the dynamic key here
+        div1_edited = st.data_editor(st.session_state.div1_data, column_config=col_config, num_rows="dynamic", key=f"div1_ui_{st.session_state.sync_key}")
         
-        if 'Playing?' not in div1_edited.columns:
-            div1_edited.insert(0, 'Playing?', True)
-            
         if ui_num_divisions == 2:
             st.subheader("Division 2")
-            if 'Playing?' not in st.session_state.div2_data.columns:
-                st.session_state.div2_data.insert(0, 'Playing?', True)
-                
-            div2_edited = st.data_editor(st.session_state.div2_data, column_config=col_config, num_rows="dynamic", key="div2_ui")
-            
-            if 'Playing?' not in div2_edited.columns:
-                div2_edited.insert(0, 'Playing?', True)
+            # And apply the dynamic key here
+            div2_edited = st.data_editor(st.session_state.div2_data, column_config=col_config, num_rows="dynamic", key=f"div2_ui_{st.session_state.sync_key}")
         else:
             div2_edited = st.session_state.div2_data
-            if 'Playing?' not in div2_edited.columns:
-                temp_df = div2_edited.copy()
-                temp_df.insert(0, 'Playing?', True)
-                div2_edited = temp_df
-                st.session_state.div2_data = temp_df
 
     with tab4:
         st.header("Clash Checker & Match Exceptions")
