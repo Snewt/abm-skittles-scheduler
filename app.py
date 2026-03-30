@@ -9,7 +9,6 @@ st.set_page_config(page_title="ABM Skittles Scheduler", layout="wide")
 # --- Security ---
 def check_password():
     def password_entered():
-        # FIX 1: Defensive secrets checking
         app_pw = st.secrets.get("app_password")
         if app_pw and st.session_state.get("password") == app_pw:
             st.session_state["password_correct"] = True
@@ -135,7 +134,6 @@ if check_password():
             return allowed
 
         def add_constraints(self):
-            # FIX 2: Safely using cp_model.LinearExpr.Sum instead of raw python sum()
             for t1 in range(self.num_teams):
                 for t2 in range(t1 + 1, self.num_teams):
                     if self.team_data.iloc[t1]['Division'] == self.team_data.iloc[t2]['Division']:
@@ -320,7 +318,6 @@ if check_password():
                     
                     penalties.append(abs_time_diff)
             
-            # FIX 3: Prevent TypeError if penalties list is totally empty
             if penalties:
                 self.model.Minimize(cp_model.LinearExpr.Sum(penalties))
 
@@ -426,11 +423,28 @@ if check_password():
         
         with col_a:
             st.subheader("Add Venue/Alley Block")
-            v_date = st.date_input("Date Closed", key="v_date")
+            # FIX: We use value=[] for range picking, but NO format="DD/MM/YYYY"
+            v_date = st.date_input("Date(s) Closed (Select one date, or start and end date)", value=[], key="v_date")
             v_scope = st.selectbox("What is closed?", ["Whole Club", "Alley 1", "Alley 2"])
             if st.button("Add Venue Block"):
-                st.session_state.venue_blocks.append({"Date": v_date, "Scope": v_scope})
-                st.rerun()
+                dates = []
+                if isinstance(v_date, (list, tuple)):
+                    dates = list(v_date)
+                elif v_date:
+                    dates = [v_date]
+
+                if len(dates) > 0:
+                    start_d = dates[0]
+                    end_d = dates[1] if len(dates) > 1 else dates[0]
+                    
+                    current = start_d
+                    while current <= end_d:
+                        if not any(b['Date'] == current and b['Scope'] == v_scope for b in st.session_state.venue_blocks):
+                            st.session_state.venue_blocks.append({"Date": current, "Scope": v_scope})
+                        current += datetime.timedelta(days=1)
+                    st.rerun()
+                else:
+                    st.warning("Please select at least one date.")
                 
             if st.session_state.venue_blocks:
                 v_df = pd.DataFrame(st.session_state.venue_blocks)
@@ -441,12 +455,29 @@ if check_password():
 
         with col_b:
             st.subheader("Add Specific Team Block")
-            t_date = st.date_input("Date Unavailable", key="t_date")
+            t_date = st.date_input("Date(s) Unavailable (Select one date, or start and end date)", value=[], key="t_date")
             t_team = st.text_input("Exact Team Name")
             if st.button("Add Team Block"):
-                if t_team:
-                    st.session_state.team_blocks.append({"Date": t_date, "Team": t_team})
+                dates = []
+                if isinstance(t_date, (list, tuple)):
+                    dates = list(t_date)
+                elif t_date:
+                    dates = [t_date]
+
+                if t_team and len(dates) > 0:
+                    start_d = dates[0]
+                    end_d = dates[1] if len(dates) > 1 else dates[0]
+                    
+                    current = start_d
+                    while current <= end_d:
+                        if not any(b['Date'] == current and b['Team'] == t_team for b in st.session_state.team_blocks):
+                            st.session_state.team_blocks.append({"Date": current, "Team": t_team})
+                        current += datetime.timedelta(days=1)
                     st.rerun()
+                elif not t_team:
+                    st.warning("Please enter a team name.")
+                else:
+                    st.warning("Please select at least one date.")
                     
             if st.session_state.team_blocks:
                 t_df = pd.DataFrame(st.session_state.team_blocks)
