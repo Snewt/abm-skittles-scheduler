@@ -549,9 +549,9 @@ if check_password():
         if 'Playing?' not in st.session_state.div1_data.columns:
             st.session_state.div1_data.insert(0, 'Playing?', True)
             
-        div1_edited = st.data_editor(st.session_state.div1_data, column_config=col_config, num_rows="dynamic", key="div1_ui")
+        # --- THE FIX: Unique new keys bypass the old corrupted memory ---
+        div1_edited = st.data_editor(st.session_state.div1_data, column_config=col_config, num_rows="dynamic", key="div1_table_v2")
         
-        # Super-safe post-edit patch
         if 'Playing?' not in div1_edited.columns:
             div1_edited.insert(0, 'Playing?', True)
             
@@ -560,14 +560,18 @@ if check_password():
             if 'Playing?' not in st.session_state.div2_data.columns:
                 st.session_state.div2_data.insert(0, 'Playing?', True)
                 
-            div2_edited = st.data_editor(st.session_state.div2_data, column_config=col_config, num_rows="dynamic", key="div2_ui")
+            # --- THE FIX: Unique new keys bypass the old corrupted memory ---
+            div2_edited = st.data_editor(st.session_state.div2_data, column_config=col_config, num_rows="dynamic", key="div2_table_v2")
             
             if 'Playing?' not in div2_edited.columns:
                 div2_edited.insert(0, 'Playing?', True)
         else:
             div2_edited = st.session_state.div2_data
             if 'Playing?' not in div2_edited.columns:
-                div2_edited.insert(0, 'Playing?', True)
+                temp_df = div2_edited.copy()
+                temp_df.insert(0, 'Playing?', True)
+                div2_edited = temp_df
+                st.session_state.div2_data = temp_df
 
     with tab4:
         st.header("Clash Checker & Match Exceptions")
